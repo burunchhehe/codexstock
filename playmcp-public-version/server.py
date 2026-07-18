@@ -6,6 +6,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,7 @@ MCP_PORT = int(os.environ.get("CODEXSTOCK_PUBLIC_MCP_PORT", "8000"))
 MCP_TRANSPORT = os.environ.get("CODEXSTOCK_PUBLIC_MCP_TRANSPORT", "stdio")
 USE_LIVE_PUBLIC_DATA = os.environ.get("CODEXSTOCK_PUBLIC_USE_LIVE_DATA", "1") != "0"
 PUBLIC_HTTP_TIMEOUT = float(os.environ.get("CODEXSTOCK_PUBLIC_HTTP_TIMEOUT", "4.0"))
+PUBLIC_MAX_WORKERS = max(1, min(int(os.environ.get("CODEXSTOCK_PUBLIC_MAX_WORKERS", "4")), 8))
 KIS_APP_KEY = os.environ.get("KIS_APP_KEY") or os.environ.get("KOREAINVESTMENT_APP_KEY")
 KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET") or os.environ.get("KOREAINVESTMENT_APP_SECRET")
 KIS_BASE_URL = os.environ.get("KIS_BASE_URL", "https://openapi.koreainvestment.com:9443").rstrip("/")
@@ -160,8 +162,12 @@ PUBLIC_WATCH_UNIVERSE = [
 ]
 
 QUOTE_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+PUBLIC_QUOTE_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+DART_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
 KIS_TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0}
 CACHE_TTL_SECONDS = 45
+DART_CACHE_TTL_SECONDS = 60 * 60 * 6
+CACHE_MAX_ENTRIES = 256
 
 CORP_CODE_ALIASES = {
     "005930": "00126380",
@@ -292,6 +298,26 @@ def _http_json(url: str) -> dict[str, Any] | None:
         return None
 
 
+def _trim_cache(cache: dict[str, tuple[float, Any]]) -> None:
+    if len(cache) <= CACHE_MAX_ENTRIES:
+        return
+    for key, _ in sorted(cache.items(), key=lambda item: item[1][0])[: len(cache) - CACHE_MAX_ENTRIES]:
+        cache.pop(key, None)
+
+
+def _cache_get(cache: dict[str, tuple[float, Any]], key: str, ttl: float) -> Any:
+    cached_at, cached = cache.get(key, (0.0, None))
+    if time.time() - cached_at < ttl:
+        return cached
+    return None
+
+
+def _cache_set(cache: dict[str, tuple[float, Any]], key: str, value: Any) -> Any:
+    cache[key] = (time.time(), value)
+    _trim_cache(cache)
+    return value
+
+
 def _http_post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any] | None:
     request = urllib.request.Request(
         url,
@@ -419,7 +445,11 @@ def _dart_get(path: str, params: dict[str, str]) -> dict[str, Any] | None:
     if not _dart_configured() or not DART_API_KEY:
         return None
     query = urllib.parse.urlencode({"crtfc_key": DART_API_KEY, **params})
-    return _http_json(f"https://opendart.fss.or.kr/api/{path}?{query}")
+    cache_key = f"{path}?{query}"
+    cached = _cache_get(DART_CACHE, cache_key, DART_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    return _cache_set(DART_CACHE, cache_key, _http_json(f"https://opendart.fss.or.kr/api/{path}?{query}"))
 
 
 def _dart_corp_code(symbol_or_name: str) -> str | None:
@@ -491,7 +521,7 @@ def _quote_yahoo(symbol_or_name: str) -> dict[str, Any] | None:
     data = _http_json(url)
     result = (data or {}).get("chart", {}).get("result") or []
     if not result:
-        QUOTE_CACHE[symbol] = (time.time(), None)
+        _cache_set(QUOTE_CACHE, symbol, None)
         return None
     item = result[0]
     meta = item.get("meta", {})
@@ -521,21 +551,34 @@ def _quote_yahoo(symbol_or_name: str) -> dict[str, Any] | None:
         "source_mode": "live_public",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
-    QUOTE_CACHE[symbol] = (time.time(), payload)
-    return payload
+    return _cache_set(QUOTE_CACHE, symbol, payload)
 
 
 def _quote_public(symbol_or_name: str) -> dict[str, Any] | None:
-    return _kis_quote(symbol_or_name) or _quote_yahoo(symbol_or_name)
+    symbol = _resolve_public_symbol(symbol_or_name)
+    source_key = "kis" if _kis_configured() and _stock_code(symbol_or_name) else "public"
+    cache_key = f"{source_key}:{symbol}"
+    cached_at, cached = PUBLIC_QUOTE_CACHE.get(cache_key, (0.0, None))
+    if time.time() - cached_at < CACHE_TTL_SECONDS:
+        return cached
+    return _cache_set(PUBLIC_QUOTE_CACHE, cache_key, _kis_quote(symbol_or_name) or _quote_yahoo(symbol_or_name))
 
 
 def _quote_many(symbols: list[str], limit: int = MAX_ITEMS) -> list[dict[str, Any]]:
-    quotes = []
-    for symbol in symbols[: max(1, min(limit, len(symbols)))]:
-        quote = _quote_public(symbol)
-        if quote:
-            quotes.append(quote)
-    return quotes
+    capped = max(1, min(limit, len(symbols)))
+    unique_symbols = list(dict.fromkeys(symbols))[:capped]
+    quotes_by_symbol: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(PUBLIC_MAX_WORKERS, len(unique_symbols))) as executor:
+        futures = {executor.submit(_quote_public, symbol): symbol for symbol in unique_symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                quote = future.result()
+            except Exception:
+                quote = None
+            if quote:
+                quotes_by_symbol[symbol] = quote
+    return [quotes_by_symbol[symbol] for symbol in unique_symbols if symbol in quotes_by_symbol]
 
 
 def _live_market_brief(market: str) -> dict[str, Any] | None:

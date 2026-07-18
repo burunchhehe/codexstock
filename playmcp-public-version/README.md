@@ -49,6 +49,25 @@ The public version can run without private keys, but it becomes stronger when th
 
 KIS integration intentionally uses quotation endpoints only. Trading/account endpoints are not included in this public server.
 
+## Performance Model
+
+The public MCP keeps the PlayMCP-friendly 20-tool surface, but uses internal performance guards:
+
+- Public quote lookups are cached for 45 seconds.
+- OpenDART company/financial lookups are cached for 6 hours.
+- Multi-symbol scans run with a small bounded thread pool.
+- Failed quote lookups are briefly cached to avoid repeated timeout storms.
+- Responses are capped and redacted before returning to the LLM.
+
+Optional tuning:
+
+```powershell
+$env:CODEXSTOCK_PUBLIC_HTTP_TIMEOUT="4.0"
+$env:CODEXSTOCK_PUBLIC_MAX_WORKERS="4"
+```
+
+Keep `CODEXSTOCK_PUBLIC_MAX_WORKERS` modest for PlayMCP hosting. Higher values may overload public data sources or trigger rate limits.
+
 ## PlayMCP Listing Draft
 
 | Field | Value |

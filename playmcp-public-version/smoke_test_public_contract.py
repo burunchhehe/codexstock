@@ -38,6 +38,9 @@ def main() -> None:
     source = SERVER.read_text(encoding="utf-8")
     assert "KIS_APP_KEY" in source
     assert "DART_API_KEY" in source
+    assert "ThreadPoolExecutor" in source
+    assert "PUBLIC_QUOTE_CACHE" in source
+    assert "DART_CACHE_TTL_SECONDS" in source
     assert "inquire-price" in source
     assert "fnlttSinglAcnt" in source
     assert "order-cash" not in source
