@@ -55,24 +55,6 @@ These are selected real CodexStock UI captures. They were included because they 
 
 ![CodexStock sub-engine operations board](docs/images/actual-ui-engine-board.png)
 
-![CodexStock module navigation cards](docs/images/actual-ui-module-cards.png)
-
-![CodexStock dashboard page menu](docs/images/actual-ui-dashboard-menu.png)
-
-![CodexStock AI trader command window](docs/images/actual-ui-ai-command.png)
-
-## Public Structure Diagrams
-
-These are synthetic structure-only demo images. They do not show real accounts, real positions, real order history, private journals, or personal runtime data.
-
-![CodexStock dashboard demo](docs/images/dashboard-demo.svg)
-
-![CodexStock sub-engine orchestration demo](docs/images/sub-engines-demo.svg)
-
-![CodexStock AI staff workflow demo](docs/images/ai-staff-demo.svg)
-
-![CodexStock replay and review demo](docs/images/replay-review-demo.svg)
-
 ## Architecture
 
 ```mermaid
