@@ -17,6 +17,7 @@ PUBLIC_DATA_DIR = os.environ.get("CODEXSTOCK_PUBLIC_DATA_DIR")
 MCP_HOST = os.environ.get("CODEXSTOCK_PUBLIC_MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("CODEXSTOCK_PUBLIC_MCP_PORT", "8000"))
 MCP_TRANSPORT = os.environ.get("CODEXSTOCK_PUBLIC_MCP_TRANSPORT", "stdio")
+DNS_REBINDING_PROTECTION = os.environ.get("CODEXSTOCK_PUBLIC_DISABLE_DNS_REBINDING", "0") != "1"
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.environ.get(
@@ -32,7 +33,10 @@ mcp = FastMCP(
     port=MCP_PORT,
     streamable_http_path="/mcp",
     stateless_http=True,
-    transport_security=TransportSecuritySettings(allowed_hosts=ALLOWED_HOSTS),
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=DNS_REBINDING_PROTECTION,
+        allowed_hosts=ALLOWED_HOSTS,
+    ),
 )
 
 PRIVATE_PATTERNS = [
@@ -427,5 +431,6 @@ if __name__ == "__main__":
     # $env:CODEXSTOCK_PUBLIC_MCP_TRANSPORT="streamable-http"
     # $env:CODEXSTOCK_PUBLIC_MCP_HOST="127.0.0.1"
     # $env:CODEXSTOCK_PUBLIC_MCP_PORT="8000"
+    # $env:CODEXSTOCK_PUBLIC_DISABLE_DNS_REBINDING="1"  # quick-tunnel testing only
     # python server.py
     mcp.run(transport=MCP_TRANSPORT)
