@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-open-source-suite"
+version = "0.3.0"
+description = "Unified facade around yfinance, vectorbt, backtrader, zipline, FinRL, QuantConnect Lean, and Freqtrade sources."
+requires-python = ">=3.10"
+
+[project.scripts]
+stock-suite = "stock_suite.cli:main"
+codexstock-research-forge = "codexstock_research_forge.cli:main"
+
+[project.optional-dependencies]
+storage = ["duckdb>=1.1,<2", "ijson>=3.3,<4", "pytz>=2024.1"]
+reports = ["openpyxl>=3.1,<4"]
+realtime = ["websocket-client>=1.8,<2"]
+
+[tool.setuptools]
+package-dir = {"" = "packages"}
+
+[tool.setuptools.packages.find]
+where = ["packages"]

@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: stock-open-source-suite
+Version: 0.3.0
+Summary: Unified facade around yfinance, vectorbt, backtrader, zipline, FinRL, QuantConnect Lean, and Freqtrade sources.
+Requires-Python: >=3.10

@@ -1,0 +1,55 @@
+{
+  "generated_at": "2026-07-02",
+  "merge_type": "source-preserved monorepo folder",
+  "projects": [
+    {
+      "name": "yfinance",
+      "path": "third_party/yfinance",
+      "upstream": "https://github.com/ranaroussi/yfinance",
+      "primary_use": "Yahoo Finance market data download",
+      "license_file": "LICENSE.txt"
+    },
+    {
+      "name": "backtrader",
+      "path": "third_party/backtrader",
+      "upstream": "https://github.com/mementum/backtrader",
+      "primary_use": "Python strategy backtesting",
+      "license_file": "LICENSE"
+    },
+    {
+      "name": "lean",
+      "path": "third_party/lean",
+      "upstream": "https://github.com/QuantConnect/Lean",
+      "primary_use": "Production-grade algorithmic trading engine",
+      "license_file": "LICENSE"
+    },
+    {
+      "name": "zipline",
+      "path": "third_party/zipline",
+      "upstream": "https://github.com/quantopian/zipline",
+      "primary_use": "Classic Python backtesting framework",
+      "license_file": "LICENSE"
+    },
+    {
+      "name": "finrl",
+      "path": "third_party/finrl",
+      "upstream": "https://github.com/AI4Finance-Foundation/FinRL",
+      "primary_use": "Reinforcement learning for finance",
+      "license_file": "LICENSE"
+    },
+    {
+      "name": "vectorbt",
+      "path": "third_party/vectorbt",
+      "upstream": "https://github.com/polakowo/vectorbt",
+      "primary_use": "Fast vectorized backtesting and research",
+      "license_file": "LICENSE.md"
+    },
+    {
+      "name": "freqtrade",
+      "path": "third_party/freqtrade",
+      "upstream": "https://github.com/freqtrade/freqtrade",
+      "primary_use": "Automated trading bot",
+      "license_file": "LICENSE"
+    }
+  ]
+}

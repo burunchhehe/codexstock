@@ -1,0 +1,8 @@
+{
+  "source": "J. Welles Wilder Jr., New Concepts in Technical Trading Systems (1978), canonical 14-period worksheet reproduced by multiple charting references",
+  "method": "Wilder smoothed RSI, arithmetic retained at full precision",
+  "period": 14,
+  "closes": [44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84, 46.08, 45.89, 46.03, 45.61, 46.28, 46.28, 46.00, 46.03, 46.41, 46.22, 45.64, 46.21, 46.25, 45.71, 46.45, 45.78, 45.35, 44.03, 44.18, 44.22, 44.57, 43.42, 42.66, 43.13],
+  "expected_from_index_14": [70.464135, 66.249619, 66.480942, 69.346853, 66.294713, 57.915021, 62.880718, 63.208789, 56.011585, 62.339929, 54.670971, 50.386815, 40.019424, 41.492635, 41.902430, 45.499497, 37.322778, 33.090483, 37.788772],
+  "absolute_tolerance": 0.00001
+}

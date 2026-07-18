@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>CodexStock.LeanAdvancedWorker</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="QuantConnect.Common" HintPath="$(LeanBin)\QuantConnect.Common.dll" Private="true" />
+    <Reference Include="QuantConnect.Indicators" HintPath="$(LeanBin)\QuantConnect.Indicators.dll" Private="true" />
+    <Reference Include="QuantConnect.Brokerages" HintPath="$(LeanBin)\QuantConnect.Brokerages.dll" Private="true" />
+    <Reference Include="NodaTime" HintPath="$(LeanBin)\NodaTime.dll" Private="true" />
+    <Reference Include="Python.Runtime" HintPath="$(LeanBin)\Python.Runtime.dll" Private="true" />
+  </ItemGroup>
+</Project>
