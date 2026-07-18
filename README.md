@@ -1,37 +1,91 @@
 # CodexStock
 
-CodexStock is a local-first AI investment research and trading-operations workbench.
+CodexStock is a local-first AI investment research, validation, and trading-operations platform.
 
-It is designed to help an individual investor organize market data, candidate discovery,
-strategy validation, paper trading, trading journals, staff-style AI reviews, and
-post-market retrospectives in one place.
+It combines market monitoring, candidate discovery, strategy research, paper/live separation, AI staff reviews, MCP access, post-market replay, and safety-first trade reconciliation into one personal workstation.
 
-> Status: public preview. The default mode is research and paper trading. Live trading
-> is disabled unless a user configures their own local broker keys and explicitly
-> enables live-trading safeguards.
+> This repository is a public evaluation build. It contains source code and non-confidential documentation only. It does not contain API keys, account numbers, live order logs, private journals, runtime databases, or personal trading records.
 
-## What Makes It Different
+## Why It Exists
 
-- AI staff workflow for research, risk review, trading notes, and post-market learning
-- MCP-friendly read-only status surfaces for ChatGPT and other clients
-- Research Forge integration for reproducible strategy experiments and report bundles
-- Korean-market oriented workflows with KIS/OpenDART-ready adapters
-- External signal inbox design for news, blog, cafe, video, and theme scanners
-- Post-market review loops for missed names, chosen trades, reasons, outcomes, and next actions
-- Safety-first separation between research/paper mode and live order submission
+Most personal trading projects stop at one of these layers:
+
+- a screener
+- a backtester
+- a broker API wrapper
+- a dashboard
+- an LLM chat helper
+
+CodexStock is built as an operating loop instead:
+
+```text
+market data -> candidates -> AI staff review -> risk gate -> paper/live plan
+            -> order/fill/account reconciliation -> journal -> post-market replay
+            -> strategy improvement -> next session
+```
+
+The goal is not to claim guaranteed returns. The goal is to make the research, decision, execution, review, and improvement process auditable.
+
+## Core Capabilities
+
+| Area | What CodexStock Provides |
+| --- | --- |
+| Market radar | Intraday radar, watchlist context, sector/theme checks, external signal inbox |
+| Candidate discovery | Screeners, momentum/liquidity filters, candidate scoring, AI decision context |
+| AI staff workflow | Research, supply/demand, fundamentals, strategy, trading, risk, and reporting roles |
+| Research Forge | Reproducible research engine for walk-forward validation, replay, reports, and evidence bundles |
+| Backtest/replay | Historical training, daily replay, missed-name review, replay evidence, learning traces |
+| Trading operations | Paper/live separation, delegated limits, order intent logs, reconciliation-oriented state machine |
+| GPT/MCP access | Redacted local MCP tools for status, candidates, reports, and learning summaries |
+| Safety | Read-only defaults, explicit live-trading gates, credential exclusion, runtime/source separation |
+
+See [docs/FEATURES.md](docs/FEATURES.md) for a fuller feature map.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI["HTS-style web dashboard"] --> APP["Local Python app server"]
+    MCP["Redacted MCP server"] --> APP
+    APP --> DATA["Local runtime stores excluded from git"]
+    APP --> KIS["Broker/market adapters"]
+    APP --> DART["Disclosure/macro adapters"]
+    APP --> STAFF["AI staff workflow"]
+    STAFF --> RISK["Risk and approval gates"]
+    APP --> FORGE["Research Forge sub-engine"]
+    APP --> EXT["External engine workers"]
+    FORGE --> REPORTS["Evidence reports"]
+    RISK --> JOURNAL["Trade journal and post-market replay"]
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
 ## Safety Boundaries
 
-This repository must not contain personal credentials or private runtime data.
+CodexStock separates source code from private runtime state.
 
-Do not commit:
+This repository intentionally excludes:
 
-- KIS, DART, Naver, Telegram, OpenAI, or other API keys
-- Account numbers, broker tokens, approval keys, or OAuth tokens
-- Private trading journals, live account snapshots, order logs, or Telegram logs
-- Local user data folders, generated runtime databases, or downloaded third-party source vaults
+- `.env`, `.env.local`, and all real credentials
+- broker API keys, tokens, account numbers, approval phrases, and chat IDs
+- live account snapshots, order logs, fill logs, reconciliation logs, and PnL logs
+- private trading journals, Telegram logs, staff long-memory files, and watchlists
+- generated databases, archives, reports, builds, and third-party source vaults
 
-See [SECURITY.md](SECURITY.md) for the public-release policy.
+Live trading is disabled by default and must only be enabled in a private local runtime with user-owned credentials and explicit safety gates.
+
+## Repository Layout
+
+| Path | Purpose |
+| --- | --- |
+| `app/` | Local app server, integrations, MCP bridge, operational logic |
+| `app/web/` | Browser dashboard UI |
+| `packages/stock_suite/` | Reusable stock-suite package facade |
+| `packages/codexstock_research_forge/` | Research-only validation engine |
+| `tools/` | Local verification, gateway, and worker scripts |
+| `tests/` | Regression tests for safety, MCP contracts, replay, research, and reconciliation |
+| `docs/` | Public documentation and evaluation notes |
+| `.env.example` | Empty configuration template |
 
 ## Quick Start
 
@@ -42,62 +96,60 @@ python -m pip install -e .
 python -m stock_suite status
 ```
 
-For local app usage, copy `.env.example` to `.env.local` and fill in only your own
-API credentials. Keep `.env.local` private.
+Run the local app:
 
 ```powershell
 Copy-Item .env.example .env.local
 .\run_app.ps1
 ```
 
-## Public vs Private Runtime
+Fill `.env.local` only with your own credentials. Never commit it.
 
-The public repository is intended to include code, examples, tests, and documentation.
-The live user's personal runtime is intentionally separate.
+## Validation
 
-| Area | Public repo | Private local runtime |
-| --- | --- | --- |
-| Source code | Yes | Yes |
-| Sample data | Yes | Optional |
-| API keys | No | User-provided |
-| Account/order logs | No | Local only |
-| Live trading | Disabled by default | Explicit local opt-in only |
-| Research/paper mode | Yes | Yes |
+```powershell
+python -m py_compile app\stock_suite_app.py app\codexstock_mcp_server.py
+node --check app\web\app.js
+python -m pytest tests
+```
 
-## Project Shape
+The full test suite may require optional local dependencies and configured mock providers. Syntax checks should work on a basic clone.
 
-- `app/`: local API server, UI routes, MCP bridge, integrations, and operating logic
-- `packages/`: reusable research and facade packages
-- `tests/`: focused regression tests for safety, MCP surfaces, and research integration
-- `docs/`: public documentation and operating notes
-- `examples/`: sample workflows and non-private examples
-- `tools/`: local maintenance and validation helpers
+## Public MCP Strategy
 
-Large upstream trading engines are referenced as optional integrations. They should be
-installed or downloaded separately for full heavyweight research runs instead of being
-committed with private runtime data.
+The internal system has a broad tool surface, but a public MCP should be compact, read-only, and easy for an LLM to choose correctly.
 
-## MCP/Public Tooling Strategy
+Recommended public surface: 18-20 read-only tools covering market brief, candidate review, strategy validation, paper replay, risk scenario, post-market review, learning report, staff summary, external signal summary, and health.
 
-CodexStock has a broad internal tool surface, but public MCP surfaces should be small,
-read-only, and easy for an LLM to choose correctly. The recommended public surface is
-about 18-20 tools focused on:
+Live order submission, account mutation, and exact private-account details should not be exposed.
 
-- market brief
-- candidate analysis
-- strategy validation
-- paper replay
-- risk scenarios
-- post-market review
-- staff meeting summary
-- external signal summary
-- system health
+See [docs/PUBLIC_MCP_SURFACE.md](docs/PUBLIC_MCP_SURFACE.md).
 
-Live order submission tools are not part of the public MCP surface.
+## Current Status
+
+CodexStock is an active personal research platform, not a certified financial product.
+
+Strong areas:
+
+- large integrated local workflow
+- strong safety separation concept
+- AI staff/review loop
+- Research Forge integration
+- MCP-ready redacted status surface
+- post-market review and learning evidence direction
+
+Still needs long-horizon proof:
+
+- forward paper/live observation over time
+- stricter point-in-time market universe evidence
+- verified corporate-action histories
+- broader out-of-sample and stress validation
+- production-grade packaging and onboarding
+
+See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Disclaimer
 
-CodexStock is research software. It is not investment advice and does not guarantee
-profit. Backtests, paper simulations, and AI-generated explanations can be wrong or
-overfit. Use real capital only after independent review, conservative limits, and
-your own responsibility.
+CodexStock is research software. It is not investment advice, a broker, a fiduciary, or a profit guarantee.
+
+Backtests, paper results, AI-generated explanations, and strategy reports can be wrong, overfit, delayed, incomplete, or unsuitable for real capital. Use at your own risk.

@@ -1,12 +1,14 @@
 # Public Release Notes
 
-This public preview is intended to show CodexStock's architecture and research workflow
-without publishing the owner's private runtime.
+This release is intended for public technical review of CodexStock's architecture,
+workflow, safety model, and research direction without publishing the owner's private
+runtime.
 
 ## Included
 
 - Local app and MCP bridge source code
 - Research Forge integration source
+- External engine worker interfaces
 - Public documentation
 - Tests and examples
 - Empty `.env.example`
@@ -40,6 +42,8 @@ Keep the public MCP surface small and read-only. Recommended tool groups:
 
 Do not expose live order submission, account mutation, or private account details.
 
+See `docs/PUBLIC_MCP_SURFACE.md` for the proposed 18-20 tool facade.
+
 ## Next Public Hardening Tasks
 
 - Add synthetic demo data for first-run onboarding
@@ -47,3 +51,9 @@ Do not expose live order submission, account mutation, or private account detail
 - Add screenshots or a short demo GIF after private data is removed
 - Split optional heavy engine adapters into separate install extras
 - Publish a 18-20 tool read-only PlayMCP facade
+
+## Public Evaluation Framing
+
+CodexStock should be reviewed as an AI-assisted investment research and operations
+platform. The public repository demonstrates architecture and workflow depth, not a
+verified profit claim.

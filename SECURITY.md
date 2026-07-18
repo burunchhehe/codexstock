@@ -38,6 +38,25 @@ the following in a private local runtime:
 
 Public MCP tools must stay read-only and must not expose order submission functions.
 
+## Before Making The Repository Public
+
+Run a release hygiene check:
+
+```powershell
+rg -n "<real credential patterns>" .
+git status --short
+```
+
+Then confirm that these paths are absent from the commit:
+
+- `data/`
+- `runtime/`
+- `reports/`
+- `build/`
+- `dist/`
+- `third_party/`
+- logs, SQLite databases, archives, executables, backups, and raw broker exports
+
 ## Reporting a Security Issue
 
 If you find a leaked credential, account identifier, unsafe live-trading default, or
