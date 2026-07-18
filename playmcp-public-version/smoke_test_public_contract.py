@@ -32,7 +32,9 @@ def main() -> None:
     assert "catalyst_check" in tools
     assert "candidate_compare" in tools
     assert "watchlist_plan" in tools
-    assert "investment_committee" in tools
+    assert "investment_committee" not in tools
+    assert "ai_research_consensus" in tools
+    assert "USE_LIVE_PUBLIC_DATA" in SERVER.read_text(encoding="utf-8")
     source = SERVER.read_text(encoding="utf-8")
     assert "investment_action" in source
     assert "disabled" in source

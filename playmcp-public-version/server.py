@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +20,8 @@ PUBLIC_DATA_DIR = os.environ.get("CODEXSTOCK_PUBLIC_DATA_DIR")
 MCP_HOST = os.environ.get("CODEXSTOCK_PUBLIC_MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("CODEXSTOCK_PUBLIC_MCP_PORT", "8000"))
 MCP_TRANSPORT = os.environ.get("CODEXSTOCK_PUBLIC_MCP_TRANSPORT", "stdio")
+USE_LIVE_PUBLIC_DATA = os.environ.get("CODEXSTOCK_PUBLIC_USE_LIVE_DATA", "1") != "0"
+PUBLIC_HTTP_TIMEOUT = float(os.environ.get("CODEXSTOCK_PUBLIC_HTTP_TIMEOUT", "4.0"))
 DNS_REBINDING_PROTECTION = os.environ.get("CODEXSTOCK_PUBLIC_DISABLE_DNS_REBINDING", "0") != "1"
 ALLOWED_HOSTS = [
     host.strip()
@@ -39,9 +44,13 @@ mcp = FastMCP(
     ),
 )
 
-PRIVATE_PATTERNS = [
-    re.compile(r"\b\d{8,14}\b"),
+PRIVATE_KEY_PATTERNS = [
     re.compile(r"(appkey|appsecret|token|authorization|account|balance|order|fill)", re.IGNORECASE),
+]
+
+PRIVATE_VALUE_PATTERNS = [
+    re.compile(r"\b\d{8,14}\b"),
+    re.compile(r"(appkey|appsecret|authorization|bearer)\s*[:=]\s*[\w.\-]+", re.IGNORECASE),
 ]
 
 PUBLIC_TOOLS = [
@@ -61,11 +70,76 @@ PUBLIC_TOOLS = [
     "risk_check",
     "watchlist_plan",
     "ai_staff_opinions",
-    "investment_committee",
+    "ai_research_consensus",
     "strategy_validation_summary",
     "post_market_review",
     "learning_summary",
 ]
+
+SYMBOL_ALIASES = {
+    "삼성전자": "005930.KS",
+    "삼성전자우": "005935.KS",
+    "sk하이닉스": "000660.KS",
+    "하이닉스": "000660.KS",
+    "현대차": "005380.KS",
+    "기아": "000270.KS",
+    "네이버": "035420.KS",
+    "naver": "035420.KS",
+    "카카오": "035720.KS",
+    "lg에너지솔루션": "373220.KS",
+    "삼성바이오로직스": "207940.KS",
+    "셀트리온": "068270.KS",
+    "한화오션": "042660.KS",
+    "두산에너빌리티": "034020.KS",
+    "대한전선": "001440.KS",
+    "삼성중공업": "010140.KS",
+    "irobot": "IRBT",
+    "아이로봇": "IRBT",
+    "apple": "AAPL",
+    "애플": "AAPL",
+    "microsoft": "MSFT",
+    "마이크로소프트": "MSFT",
+    "nvidia": "NVDA",
+    "엔비디아": "NVDA",
+    "tesla": "TSLA",
+    "테슬라": "TSLA",
+    "meta": "META",
+    "amazon": "AMZN",
+    "아마존": "AMZN",
+}
+
+MARKET_INDEX_SYMBOLS = {
+    "KOREA": ["^KS11", "^KQ11", "KRW=X"],
+    "KR": ["^KS11", "^KQ11", "KRW=X"],
+    "US": ["^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX"],
+    "ALL": ["^KS11", "^KQ11", "^GSPC", "^IXIC", "KRW=X"],
+}
+
+PUBLIC_WATCH_UNIVERSE = [
+    "005930.KS",
+    "000660.KS",
+    "005380.KS",
+    "000270.KS",
+    "035420.KS",
+    "035720.KS",
+    "373220.KS",
+    "207940.KS",
+    "068270.KS",
+    "042660.KS",
+    "034020.KS",
+    "001440.KS",
+    "010140.KS",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "TSLA",
+    "META",
+    "AMZN",
+    "IRBT",
+]
+
+QUOTE_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+CACHE_TTL_SECONDS = 45
 
 DEMO_STATE: dict[str, Any] = {
     "as_of": "public-preview",
@@ -132,12 +206,12 @@ def _read_state() -> dict[str, Any]:
 
 def _data_mode() -> str:
     if not PUBLIC_DATA_DIR:
-        return "sample"
+        return "live_public" if USE_LIVE_PUBLIC_DATA else "sample"
     return str(_read_state().get("data_mode", "delayed"))
 
 
 def _private_key(key: str) -> bool:
-    return any(pattern.search(key) for pattern in PRIVATE_PATTERNS)
+    return any(pattern.search(key) for pattern in PRIVATE_KEY_PATTERNS)
 
 
 def _redact(value: Any) -> Any:
@@ -147,7 +221,7 @@ def _redact(value: Any) -> Any:
         return [_redact(v) for v in value[:MAX_ITEMS]]
     if isinstance(value, str):
         text = value[:MAX_TEXT]
-        for pattern in PRIVATE_PATTERNS:
+        for pattern in PRIVATE_VALUE_PATTERNS:
             text = pattern.sub("[redacted]", text)
         return text
     return value
@@ -168,8 +242,144 @@ def _response(payload: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _http_json(url: str) -> dict[str, Any] | None:
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 CodexStockResearchPublic/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=PUBLIC_HTTP_TIMEOUT) as response:
+            if response.status >= 400:
+                return None
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _resolve_public_symbol(symbol_or_name: str) -> str:
+    raw = symbol_or_name.strip()
+    lowered = raw.lower()
+    if lowered in SYMBOL_ALIASES:
+        return SYMBOL_ALIASES[lowered]
+    if re.fullmatch(r"\d{6}", raw):
+        return f"{raw}.KS"
+    return raw.upper()
+
+
+def _quote_yahoo(symbol_or_name: str) -> dict[str, Any] | None:
+    if not USE_LIVE_PUBLIC_DATA:
+        return None
+    symbol = _resolve_public_symbol(symbol_or_name)
+    cached_at, cached = QUOTE_CACHE.get(symbol, (0.0, None))
+    if time.time() - cached_at < CACHE_TTL_SECONDS:
+        return cached
+
+    encoded = urllib.parse.quote(symbol)
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?range=5d&interval=1d"
+    data = _http_json(url)
+    result = (data or {}).get("chart", {}).get("result") or []
+    if not result:
+        QUOTE_CACHE[symbol] = (time.time(), None)
+        return None
+    item = result[0]
+    meta = item.get("meta", {})
+    quote = ((item.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = [value for value in (quote.get("close") or []) if isinstance(value, (int, float))]
+    volumes = [value for value in (quote.get("volume") or []) if isinstance(value, (int, float))]
+    price = meta.get("regularMarketPrice")
+    previous_close = meta.get("previousClose")
+    if price is None and closes:
+        price = closes[-1]
+    if previous_close is None and len(closes) >= 2:
+        previous_close = closes[-2]
+    change_percent = None
+    if isinstance(price, (int, float)) and isinstance(previous_close, (int, float)) and previous_close:
+        change_percent = round((price - previous_close) / previous_close * 100, 2)
+    payload = {
+        "symbol": symbol,
+        "name": meta.get("shortName") or meta.get("longName") or symbol,
+        "exchange": meta.get("exchangeName"),
+        "currency": meta.get("currency"),
+        "price": price,
+        "previous_close": previous_close,
+        "change_percent": change_percent,
+        "volume": volumes[-1] if volumes else meta.get("regularMarketVolume"),
+        "market_state": meta.get("marketState"),
+        "source": "Yahoo Finance public chart endpoint",
+        "source_mode": "live_public",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    QUOTE_CACHE[symbol] = (time.time(), payload)
+    return payload
+
+
+def _quote_many(symbols: list[str], limit: int = MAX_ITEMS) -> list[dict[str, Any]]:
+    quotes = []
+    for symbol in symbols[: max(1, min(limit, len(symbols)))]:
+        quote = _quote_yahoo(symbol)
+        if quote:
+            quotes.append(quote)
+    return quotes
+
+
+def _live_market_brief(market: str) -> dict[str, Any] | None:
+    symbols = MARKET_INDEX_SYMBOLS.get(market.upper(), MARKET_INDEX_SYMBOLS["ALL"])
+    quotes = _quote_many(symbols, limit=len(symbols))
+    if not quotes:
+        return None
+    positives = [quote for quote in quotes if (quote.get("change_percent") or 0) > 0]
+    negatives = [quote for quote in quotes if (quote.get("change_percent") or 0) < 0]
+    tone = "mixed"
+    if len(positives) > len(negatives):
+        tone = "positive"
+    elif len(negatives) > len(positives):
+        tone = "negative"
+    return {
+        "summary": f"Public market snapshot is {tone}. {len(positives)} up, {len(negatives)} down among tracked indices.",
+        "tone": tone,
+        "indices": quotes,
+        "focus": ["index direction", "FX", "theme rotation", "liquidity"],
+        "warning": "Public delayed/live source snapshot. Research reference only, not investment advice.",
+    }
+
+
+def _live_candidates(market: str, limit: int) -> list[dict[str, Any]]:
+    symbols = PUBLIC_WATCH_UNIVERSE
+    if market.upper() in {"KR", "KOREA", "KOSPI", "KOSDAQ"}:
+        symbols = [symbol for symbol in symbols if symbol.endswith(".KS") or symbol.endswith(".KQ")]
+    elif market.upper() == "US":
+        symbols = [symbol for symbol in symbols if "." not in symbol]
+    quotes = _quote_many(symbols, limit=len(symbols))
+    quotes.sort(key=lambda item: (item.get("change_percent") is not None, item.get("change_percent") or -999), reverse=True)
+    candidates = []
+    for quote in quotes[: max(1, min(limit, MAX_ITEMS))]:
+        candidates.append({
+            "symbol": quote.get("symbol"),
+            "name": quote.get("name"),
+            "market": "KR" if str(quote.get("symbol", "")).endswith((".KS", ".KQ")) else "US",
+            "price": quote.get("price"),
+            "currency": quote.get("currency"),
+            "change_percent": quote.get("change_percent"),
+            "volume": quote.get("volume"),
+            "reason": "Public watch-universe momentum and price-change scan.",
+            "risk": "Needs catalyst, liquidity, and validation checks before any private decision.",
+            "source_mode": quote.get("source_mode"),
+        })
+    return candidates
+
+
 def _find_candidate(symbol_or_name: str) -> dict[str, Any] | None:
     needle = symbol_or_name.strip().lower()
+    live = _quote_yahoo(symbol_or_name)
+    if live:
+        return {
+            "symbol": live.get("symbol"),
+            "name": live.get("name"),
+            "market": "KR" if str(live.get("symbol", "")).endswith((".KS", ".KQ")) else "US",
+            "price": live.get("price"),
+            "currency": live.get("currency"),
+            "change_percent": live.get("change_percent"),
+            "volume": live.get("volume"),
+            "reason": "Public quote snapshot matched this query.",
+            "risk": "Live/public data can be delayed or incomplete. Use as research input only.",
+        }
     for candidate in _read_state().get("candidates", []):
         haystack = f"{candidate.get('symbol', '')} {candidate.get('name', '')}".lower()
         if needle and needle in haystack:
@@ -215,7 +425,13 @@ def system_health() -> dict[str, Any]:
 def market_brief(market: str = "ALL") -> dict[str, Any]:
     """Summarize the broad market regime, tone, themes, and key risks."""
     state = _read_state()
-    return _response({"ok": True, "market": market, "brief": state.get("market_brief", {})})
+    live_brief = _live_market_brief(market)
+    return _response({
+        "ok": True,
+        "market": market,
+        "brief": live_brief or state.get("market_brief", {}),
+        "fallback_used": live_brief is None,
+    })
 
 
 @mcp.tool()
@@ -248,6 +464,14 @@ def resolve_stock(query: str, market: str = "ALL", limit: int = 5) -> dict[str, 
     """Resolve a stock name or code using public preview candidates."""
     matches = []
     needle = query.strip().lower()
+    live = _quote_yahoo(query)
+    if live and (market == "ALL" or market.upper() in {"KR", "KOREA", "US"}):
+        matches.append({
+            "symbol": live.get("symbol"),
+            "name": live.get("name"),
+            "market": "KR" if str(live.get("symbol", "")).endswith((".KS", ".KQ")) else "US",
+            "source_mode": "live_public",
+        })
     for candidate in _read_state().get("candidates", []):
         haystack = f"{candidate.get('symbol', '')} {candidate.get('name', '')} {candidate.get('market', '')}".lower()
         if not needle or needle in haystack:
@@ -259,6 +483,13 @@ def resolve_stock(query: str, market: str = "ALL", limit: int = 5) -> dict[str, 
 @mcp.tool()
 def stock_snapshot(symbol_or_name: str) -> dict[str, Any]:
     """Return a compact public snapshot for a candidate."""
+    live = _quote_yahoo(symbol_or_name)
+    if live:
+        return _response({
+            "ok": True,
+            "snapshot": live,
+            "note": "Public market-data snapshot. It may be delayed or incomplete and is not investment advice.",
+        })
     candidate = _find_candidate(symbol_or_name)
     if not candidate:
         return _response({"ok": False, "message": "No public snapshot found. Connect redacted snapshots for live data."})
@@ -268,8 +499,15 @@ def stock_snapshot(symbol_or_name: str) -> dict[str, Any]:
 @mcp.tool()
 def market_movers(market: str = "ALL", ranking_type: str = "theme_strength") -> dict[str, Any]:
     """Show hot-stock or theme movement categories without private account data."""
-    candidates = _read_state().get("candidates", [])
-    return _response({"ok": True, "market": market, "ranking_type": ranking_type, "items": candidates[:MAX_ITEMS]})
+    live_candidates = _live_candidates(market, MAX_ITEMS)
+    candidates = live_candidates or _read_state().get("candidates", [])
+    return _response({
+        "ok": True,
+        "market": market,
+        "ranking_type": ranking_type,
+        "items": candidates[:MAX_ITEMS],
+        "fallback_used": not bool(live_candidates),
+    })
 
 
 @mcp.tool()
@@ -316,8 +554,16 @@ def disclosure_financial_summary(symbol_or_name: str) -> dict[str, Any]:
 @mcp.tool()
 def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int = 5) -> dict[str, Any]:
     """Return CodexStock watch candidates after public evidence filtering."""
-    candidates = _read_state().get("candidates", [])[: max(1, min(limit, MAX_ITEMS))]
-    return _response({"ok": True, "market": market, "style": style, "candidates": candidates})
+    capped_limit = max(1, min(limit, MAX_ITEMS))
+    live_candidates = _live_candidates(market, capped_limit)
+    candidates = live_candidates or _read_state().get("candidates", [])[:capped_limit]
+    return _response({
+        "ok": True,
+        "market": market,
+        "style": style,
+        "candidates": candidates,
+        "fallback_used": not bool(live_candidates),
+    })
 
 
 @mcp.tool()
@@ -397,8 +643,8 @@ def ai_staff_opinions(symbol_or_name: str = "market") -> dict[str, Any]:
 
 
 @mcp.tool()
-def investment_committee(symbol_or_name: str = "market", allocation_percent: float = 0.0) -> dict[str, Any]:
-    """Show a public CodexStock-style research committee observation."""
+def ai_research_consensus(symbol_or_name: str = "market", allocation_percent: float = 0.0) -> dict[str, Any]:
+    """Show a public CodexStock-style AI research consensus observation."""
     candidate = _find_candidate(symbol_or_name) or {
         "symbol": symbol_or_name,
         "name": symbol_or_name,
@@ -408,9 +654,9 @@ def investment_committee(symbol_or_name: str = "market", allocation_percent: flo
     risk_level = _risk_level(allocation_percent)
     return _response({
         "ok": True,
-        "mode": "public_read_only_research_committee",
+        "mode": "public_read_only_ai_research_consensus",
         "target": candidate,
-        "chair_observation": "Review candidate strength, catalyst quality, liquidity, risk concentration, and validation evidence before any private decision process.",
+        "lead_observation": "Review candidate strength, catalyst quality, liquidity, risk concentration, and validation evidence before any private decision process.",
         "staff_votes": [
             {"role": "Research AI", "vote": "watch", "reason": "Evidence exists but source quality must be checked."},
             {"role": "Supply/Demand", "vote": "watch", "reason": "Liquidity and pressure should confirm the theme."},

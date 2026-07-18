@@ -6,6 +6,8 @@ It is intentionally separate from the private CodexStock runtime. It does not ex
 
 > CodexStock Research is an investment research support service. It does not provide investment advisory service, trade recommendation, discretionary trading, or live order execution. All outputs are for research reference only, and investment decisions remain the user's responsibility.
 
+By default, this public server tries to use public market-data snapshots first. If public data is unavailable, rate-limited, or blocked, it falls back to safe preview data instead of exposing private runtime files.
+
 ## Positioning
 
 Most stock MCP servers answer questions like:
@@ -15,7 +17,7 @@ Most stock MCP servers answer questions like:
 - What does the financial statement show?
 - Which names moved today?
 
-CodexStock Research should also answer:
+CodexStock Research should cover those basics and also answer:
 
 - Why is this stock worth reviewing?
 - Which evidence supports or weakens the candidate?
@@ -26,13 +28,13 @@ CodexStock Research should also answer:
 - What catalyst might explain a move?
 - Which candidate is stronger after comparison?
 - What conditions keep a name on the watchlist?
-- What would the research committee observe?
+- What would the AI research consensus observe?
 - What did the replay/review loop learn?
 
 In short:
 
 ```text
-stock information lookup + market risk / theme / catalyst / candidate / risk / replay workflow
+public stock information lookup + market risk / theme / catalyst / candidate / risk / replay workflow
 ```
 
 ## PlayMCP Listing Draft
@@ -48,7 +50,7 @@ stock information lookup + market risk / theme / catalyst / candidate / risk / r
 Description draft:
 
 ```text
-CodexStock Research is not just a stock quote MCP. It is a read-only investment research MCP that connects market brief, risk events, sector/theme strength, catalysts, candidate discovery, candidate comparison, AI staff review, risk checks, strategy validation, post-market replay, and learning summaries. It does not provide live order submission, account lookup, tokens, or private trading journals.
+CodexStock Research is a read-only stock research MCP. It combines public market snapshots, sector/theme checks, stock lookup, mover scans, news/catalyst context, candidate discovery, candidate comparison, AI staff viewpoints, risk checks, strategy validation, post-market replay, and learning summaries. It does not provide live order submission, account lookup, tokens, or private trading journals.
 ```
 
 Conversation examples:
@@ -81,7 +83,7 @@ The public server exposes 20 read-only tools:
 | `risk_check` | Run a public risk explanation |
 | `watchlist_plan` | Create keep/drop watchlist conditions |
 | `ai_staff_opinions` | Show AI staff viewpoints |
-| `investment_committee` | Show a CodexStock-style research committee observation |
+| `ai_research_consensus` | Show a CodexStock-style AI research consensus observation |
 | `strategy_validation_summary` | Summarize strategy validation status |
 | `post_market_review` | Summarize replay/review output |
 | `learning_summary` | Summarize what the system learned |
@@ -100,7 +102,7 @@ Some tools may sound similar, so their roles are intentionally separated:
 | `candidate_compare` | Relative research comparison between watch candidates |
 | `explain_candidate` | Detailed evidence and invalidation checks for one candidate |
 | `watchlist_plan` | Keep/drop research conditions for monitoring |
-| `investment_committee` | Research-only committee observation, not a buy/sell recommendation |
+| `ai_research_consensus` | Research-only AI consensus observation, not a buy/sell recommendation |
 
 ## Response Metadata
 
@@ -118,7 +120,7 @@ Every tool response includes safety metadata:
 }
 ```
 
-When `data_mode` is `sample`, outputs are public examples and must not be interpreted as current market results.
+When `data_mode` is `live_public`, outputs are based on public market sources and may be delayed, incomplete, or temporarily unavailable. When `data_mode` is `sample`, outputs are public examples and must not be interpreted as current market results.
 
 ## Local Run
 
@@ -151,7 +153,7 @@ For a hosted PlayMCP endpoint, deploy this folder as a small read-only MCP serve
 
 ## Data Model
 
-By default, the server returns safe demo/public-preview data. To connect it to a private CodexStock runtime safely, export only redacted JSON snapshots into a separate directory and set:
+By default, the server attempts public market-data snapshots and falls back to safe demo/public-preview data. Set `CODEXSTOCK_PUBLIC_USE_LIVE_DATA=0` to force sample mode. To connect it to a private CodexStock runtime safely, export only redacted JSON snapshots into a separate directory and set:
 
 ```powershell
 $env:CODEXSTOCK_PUBLIC_DATA_DIR="C:\path\to\redacted_public_snapshots"
