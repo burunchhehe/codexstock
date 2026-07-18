@@ -16,19 +16,19 @@ Use these values on the PlayMCP registration page.
 Korean draft for the PlayMCP form:
 
 ```text
-AI 주식 리서처는 코덱스스톡 기반의 읽기 전용 주식 리서치 MCP입니다. 공개 시장 데이터와 안전한 미리보기 데이터를 바탕으로 시장 분위기, 강한 업종과 테마, 종목 조회, 상승·하락 종목, 뉴스·재료 맥락, 공시·재무 점검, 후보 발굴, 후보 비교, AI 직원별 의견, 리스크 점검, AI 종합 리서치, 전략 검증, 장마감 복기와 학습 요약을 제공합니다. 실전 주문, 계좌·잔고·체결 조회, API 키·토큰 및 개인 매매기록에는 접근하지 않습니다. 모든 결과는 투자 연구와 정보 제공을 위한 참고자료이며 매매 추천이나 투자 자문이 아닙니다. 자세한 기능과 공개 범위는 GitHub에서 확인할 수 있습니다: https://github.com/burunchhehe/codexstock
+AI 주식 리서처는 코덱스스톡 기반의 읽기 전용 주식 리서치 MCP입니다. 공개 시장 데이터와 선택적 KIS/OpenDART 조회 데이터를 바탕으로 시장 분위기, 강한 업종과 테마, 종목 조회, 상승·하락 종목, 뉴스·재료 맥락, 공시·재무 점검, 후보 발굴, 후보 비교, AI 직원별 의견, 리스크 점검, AI 종합 리서치, 전략 검증, 장마감 복기와 학습 요약을 제공합니다. 실전 주문, 계좌·잔고·체결 조회, API 키·토큰 및 개인 매매기록에는 접근하지 않습니다. 모든 결과는 투자 연구와 정보 제공을 위한 참고자료이며 매매 추천이나 투자 자문이 아닙니다. 자세한 기능과 공개 범위는 GitHub에서 확인할 수 있습니다: https://github.com/burunchhehe/codexstock
 ```
 
 Shorter Korean draft if the form feels too tight:
 
 ```text
-AI 주식 리서처는 코덱스스톡 기반의 읽기 전용 주식 리서치 MCP입니다. 공개 시장 데이터로 시장 분위기, 업종·테마, 종목 조회, 상승·하락 종목, 뉴스·재료, 공시·재무, 후보 비교, AI 의견, 리스크, 전략 검증, 장마감 복기와 학습 요약을 제공합니다. 실전 주문, 계좌·잔고·체결, 토큰, 개인 매매기록에는 접근하지 않으며 매매 추천이나 투자 자문이 아닙니다.
+AI 주식 리서처는 코덱스스톡 기반의 읽기 전용 주식 리서치 MCP입니다. 공개 시장 데이터와 선택적 KIS/OpenDART 조회 데이터로 시장 분위기, 업종·테마, 종목 조회, 상승·하락 종목, 뉴스·재료, 공시·재무, 후보 비교, AI 의견, 리스크, 전략 검증, 장마감 복기와 학습 요약을 제공합니다. 실전 주문, 계좌·잔고·체결, 토큰, 개인 매매기록에는 접근하지 않으며 매매 추천이나 투자 자문이 아닙니다.
 ```
 
 English draft:
 
 ```text
-AI Stock Researcher is a read-only stock research MCP powered by CodexStock. It combines public market snapshots, sector/theme checks, stock lookup, mover scans, news/catalyst context, disclosure and fundamental checks, candidate discovery, candidate comparison, AI staff viewpoints, risk checks, AI research consensus, strategy validation, post-market review, and learning summaries. It does not access live orders, accounts, balances, fills, tokens, or private trading journals.
+AI Stock Researcher is a read-only stock research MCP powered by CodexStock. It combines public market snapshots, optional KIS/OpenDART read-only data, sector/theme checks, stock lookup, mover scans, news/catalyst context, disclosure and fundamental checks, candidate discovery, candidate comparison, AI staff viewpoints, risk checks, AI research consensus, strategy validation, post-market review, and learning summaries. It does not access live orders, accounts, balances, fills, tokens, or private trading journals.
 ```
 
 ## Conversation Examples

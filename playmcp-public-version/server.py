@@ -22,6 +22,10 @@ MCP_PORT = int(os.environ.get("CODEXSTOCK_PUBLIC_MCP_PORT", "8000"))
 MCP_TRANSPORT = os.environ.get("CODEXSTOCK_PUBLIC_MCP_TRANSPORT", "stdio")
 USE_LIVE_PUBLIC_DATA = os.environ.get("CODEXSTOCK_PUBLIC_USE_LIVE_DATA", "1") != "0"
 PUBLIC_HTTP_TIMEOUT = float(os.environ.get("CODEXSTOCK_PUBLIC_HTTP_TIMEOUT", "4.0"))
+KIS_APP_KEY = os.environ.get("KIS_APP_KEY") or os.environ.get("KOREAINVESTMENT_APP_KEY")
+KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET") or os.environ.get("KOREAINVESTMENT_APP_SECRET")
+KIS_BASE_URL = os.environ.get("KIS_BASE_URL", "https://openapi.koreainvestment.com:9443").rstrip("/")
+DART_API_KEY = os.environ.get("DART_API_KEY") or os.environ.get("OPENDART_API_KEY")
 DNS_REBINDING_PROTECTION = os.environ.get("CODEXSTOCK_PUBLIC_DISABLE_DNS_REBINDING", "0") != "1"
 ALLOWED_HOSTS = [
     host.strip()
@@ -108,6 +112,23 @@ SYMBOL_ALIASES = {
     "아마존": "AMZN",
 }
 
+CODE_NAME_ALIASES = {
+    "005930": "삼성전자",
+    "005935": "삼성전자우",
+    "000660": "SK하이닉스",
+    "005380": "현대차",
+    "000270": "기아",
+    "035420": "NAVER",
+    "035720": "카카오",
+    "373220": "LG에너지솔루션",
+    "207940": "삼성바이오로직스",
+    "068270": "셀트리온",
+    "042660": "한화오션",
+    "034020": "두산에너빌리티",
+    "001440": "대한전선",
+    "010140": "삼성중공업",
+}
+
 MARKET_INDEX_SYMBOLS = {
     "KOREA": ["^KS11", "^KQ11", "KRW=X"],
     "KR": ["^KS11", "^KQ11", "KRW=X"],
@@ -139,7 +160,25 @@ PUBLIC_WATCH_UNIVERSE = [
 ]
 
 QUOTE_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+KIS_TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0}
 CACHE_TTL_SECONDS = 45
+
+CORP_CODE_ALIASES = {
+    "005930": "00126380",
+    "005935": "00126380",
+    "000660": "00164779",
+    "005380": "00164742",
+    "000270": "00106641",
+    "035420": "00266961",
+    "035720": "00258801",
+    "373220": "01515323",
+    "207940": "00877059",
+    "068270": "00413046",
+    "042660": "00111704",
+    "034020": "00159616",
+    "001440": "00148914",
+    "010140": "00126446",
+}
 
 DEMO_STATE: dict[str, Any] = {
     "as_of": "public-preview",
@@ -253,6 +292,182 @@ def _http_json(url: str) -> dict[str, Any] | None:
         return None
 
 
+def _http_post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any] | None:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "User-Agent": "Mozilla/5.0 CodexStockResearchPublic/1.0",
+            "Content-Type": "application/json; charset=utf-8",
+            **(headers or {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=PUBLIC_HTTP_TIMEOUT) as response:
+            if response.status >= 400:
+                return None
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _kis_configured() -> bool:
+    return bool(KIS_APP_KEY and KIS_APP_SECRET)
+
+
+def _dart_configured() -> bool:
+    return bool(DART_API_KEY)
+
+
+def _stock_code(symbol_or_name: str) -> str | None:
+    symbol = _resolve_public_symbol(symbol_or_name)
+    match = re.search(r"(\d{6})", symbol)
+    return match.group(1) if match else None
+
+
+def _kis_access_token() -> str | None:
+    if not _kis_configured():
+        return None
+    now = time.time()
+    if KIS_TOKEN_CACHE.get("token") and float(KIS_TOKEN_CACHE.get("expires_at") or 0) > now + 60:
+        return str(KIS_TOKEN_CACHE["token"])
+    data = _http_post_json(
+        f"{KIS_BASE_URL}/oauth2/tokenP",
+        {"grant_type": "client_credentials", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET},
+    )
+    token = (data or {}).get("access_token")
+    expires_in = float((data or {}).get("expires_in") or 3600)
+    if not token:
+        return None
+    KIS_TOKEN_CACHE["token"] = token
+    KIS_TOKEN_CACHE["expires_at"] = now + min(expires_in, 60 * 60 * 6)
+    return str(token)
+
+
+def _kis_headers(tr_id: str) -> dict[str, str] | None:
+    token = _kis_access_token()
+    if not token or not KIS_APP_KEY or not KIS_APP_SECRET:
+        return None
+    return {
+        "Content-Type": "application/json; charset=utf-8",
+        "authorization": f"Bearer {token}",
+        "appkey": KIS_APP_KEY,
+        "appsecret": KIS_APP_SECRET,
+        "tr_id": tr_id,
+        "custtype": "P",
+    }
+
+
+def _kis_get(path: str, params: dict[str, str], tr_id: str) -> dict[str, Any] | None:
+    headers = _kis_headers(tr_id)
+    if not headers:
+        return None
+    query = urllib.parse.urlencode(params)
+    url = f"{KIS_BASE_URL}{path}?{query}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=PUBLIC_HTTP_TIMEOUT) as response:
+            if response.status >= 400:
+                return None
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _kis_quote(symbol_or_name: str) -> dict[str, Any] | None:
+    code = _stock_code(symbol_or_name)
+    if not code or not _kis_configured():
+        return None
+    data = _kis_get(
+        "/uapi/domestic-stock/v1/quotations/inquire-price",
+        {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code},
+        "FHKST01010100",
+    )
+    output = (data or {}).get("output") or {}
+    if not output:
+        return None
+
+    def as_float(key: str) -> float | None:
+        raw = output.get(key)
+        try:
+            return float(str(raw).replace(",", ""))
+        except Exception:
+            return None
+
+    return {
+        "symbol": f"{code}.KS",
+        "name": CODE_NAME_ALIASES.get(code, code),
+        "exchange": "KIS domestic stock",
+        "currency": "KRW",
+        "price": as_float("stck_prpr"),
+        "previous_close": as_float("stck_sdpr"),
+        "change_percent": as_float("prdy_ctrt"),
+        "volume": as_float("acml_vol"),
+        "trading_value": as_float("acml_tr_pbmn"),
+        "market_cap": as_float("hts_avls"),
+        "open": as_float("stck_oprc"),
+        "high": as_float("stck_hgpr"),
+        "low": as_float("stck_lwpr"),
+        "source": "KIS Open API domestic-stock inquire-price",
+        "source_mode": "kis_read_only",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _dart_get(path: str, params: dict[str, str]) -> dict[str, Any] | None:
+    if not _dart_configured() or not DART_API_KEY:
+        return None
+    query = urllib.parse.urlencode({"crtfc_key": DART_API_KEY, **params})
+    return _http_json(f"https://opendart.fss.or.kr/api/{path}?{query}")
+
+
+def _dart_corp_code(symbol_or_name: str) -> str | None:
+    code = _stock_code(symbol_or_name)
+    return CORP_CODE_ALIASES.get(code or "")
+
+
+def _dart_company(symbol_or_name: str) -> dict[str, Any] | None:
+    corp_code = _dart_corp_code(symbol_or_name)
+    if not corp_code:
+        return None
+    data = _dart_get("company.json", {"corp_code": corp_code})
+    if not data or data.get("status") not in {None, "000"}:
+        return None
+    return data
+
+
+def _dart_financial(symbol_or_name: str, year: str | None = None, report_code: str = "11011") -> dict[str, Any] | None:
+    corp_code = _dart_corp_code(symbol_or_name)
+    if not corp_code:
+        return None
+    target_year = year or str(datetime.now().year - 1)
+    data = _dart_get("fnlttSinglAcnt.json", {
+        "corp_code": corp_code,
+        "bsns_year": target_year,
+        "reprt_code": report_code,
+    })
+    if not data or data.get("status") not in {None, "000"}:
+        return None
+    rows = []
+    for row in (data.get("list") or [])[:MAX_ITEMS]:
+        rows.append({
+            "account": row.get("account_nm"),
+            "statement": row.get("sj_nm"),
+            "current_amount": row.get("thstrm_amount"),
+            "previous_amount": row.get("frmtrm_amount"),
+            "currency": row.get("currency"),
+        })
+    return {
+        "corp_code": corp_code,
+        "year": target_year,
+        "report_code": report_code,
+        "accounts": rows,
+        "source": "OpenDART fnlttSinglAcnt",
+        "source_mode": "dart_read_only",
+    }
+
+
 def _resolve_public_symbol(symbol_or_name: str) -> str:
     raw = symbol_or_name.strip()
     lowered = raw.lower()
@@ -310,10 +525,14 @@ def _quote_yahoo(symbol_or_name: str) -> dict[str, Any] | None:
     return payload
 
 
+def _quote_public(symbol_or_name: str) -> dict[str, Any] | None:
+    return _kis_quote(symbol_or_name) or _quote_yahoo(symbol_or_name)
+
+
 def _quote_many(symbols: list[str], limit: int = MAX_ITEMS) -> list[dict[str, Any]]:
     quotes = []
     for symbol in symbols[: max(1, min(limit, len(symbols)))]:
-        quote = _quote_yahoo(symbol)
+        quote = _quote_public(symbol)
         if quote:
             quotes.append(quote)
     return quotes
@@ -367,7 +586,7 @@ def _live_candidates(market: str, limit: int) -> list[dict[str, Any]]:
 
 def _find_candidate(symbol_or_name: str) -> dict[str, Any] | None:
     needle = symbol_or_name.strip().lower()
-    live = _quote_yahoo(symbol_or_name)
+    live = _quote_public(symbol_or_name)
     if live:
         return {
             "symbol": live.get("symbol"),
@@ -409,6 +628,16 @@ def system_health() -> dict[str, Any]:
         "last_data_update": state.get("as_of", "unknown"),
         "tool_count": len(PUBLIC_TOOLS),
         "private_runtime_connected": bool(PUBLIC_DATA_DIR),
+        "kis_read_only_configured": _kis_configured(),
+        "dart_read_only_configured": _dart_configured(),
+        "enabled_public_sources": [
+            source for source, enabled in {
+                "KIS Open API read-only quote": _kis_configured(),
+                "OpenDART read-only disclosure/financial": _dart_configured(),
+                "Yahoo Finance public fallback": USE_LIVE_PUBLIC_DATA,
+                "redacted CodexStock snapshots": bool(PUBLIC_DATA_DIR),
+            }.items() if enabled
+        ],
         "sub_engine_count": len(sub_engines),
         "active_or_optional_sub_engine_count": len(active_engines),
         "delayed_or_private_only_engines": [
@@ -464,7 +693,7 @@ def resolve_stock(query: str, market: str = "ALL", limit: int = 5) -> dict[str, 
     """Resolve a stock name or code using public preview candidates."""
     matches = []
     needle = query.strip().lower()
-    live = _quote_yahoo(query)
+    live = _quote_public(query)
     if live and (market == "ALL" or market.upper() in {"KR", "KOREA", "US"}):
         matches.append({
             "symbol": live.get("symbol"),
@@ -483,7 +712,7 @@ def resolve_stock(query: str, market: str = "ALL", limit: int = 5) -> dict[str, 
 @mcp.tool()
 def stock_snapshot(symbol_or_name: str) -> dict[str, Any]:
     """Return a compact public snapshot for a candidate."""
-    live = _quote_yahoo(symbol_or_name)
+    live = _quote_public(symbol_or_name)
     if live:
         return _response({
             "ok": True,
@@ -543,6 +772,17 @@ def catalyst_check(symbol_or_name: str) -> dict[str, Any]:
 @mcp.tool()
 def disclosure_financial_summary(symbol_or_name: str) -> dict[str, Any]:
     """Summarize disclosure and fundamental context in public-preview form."""
+    company = _dart_company(symbol_or_name)
+    financial = _dart_financial(symbol_or_name)
+    if company or financial:
+        return _response({
+            "ok": True,
+            "target": symbol_or_name,
+            "company": company,
+            "financial": financial,
+            "summary": "OpenDART read-only company and major-account data are attached when configured.",
+            "checks": ["recent filings", "revenue trend", "profitability", "debt/liquidity", "one-off events"],
+        })
     return _response({
         "ok": True,
         "target": symbol_or_name,

@@ -36,6 +36,12 @@ def main() -> None:
     assert "ai_research_consensus" in tools
     assert "USE_LIVE_PUBLIC_DATA" in SERVER.read_text(encoding="utf-8")
     source = SERVER.read_text(encoding="utf-8")
+    assert "KIS_APP_KEY" in source
+    assert "DART_API_KEY" in source
+    assert "inquire-price" in source
+    assert "fnlttSinglAcnt" in source
+    assert "order-cash" not in source
+    assert "inquire-balance" not in source
     assert "investment_action" in source
     assert "disabled" in source
     assert "Not investment advice" in source

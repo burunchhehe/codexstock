@@ -6,7 +6,7 @@ It is intentionally separate from the private CodexStock runtime. It does not ex
 
 > CodexStock Research is an investment research support service. It does not provide investment advisory service, trade recommendation, discretionary trading, or live order execution. All outputs are for research reference only, and investment decisions remain the user's responsibility.
 
-By default, this public server tries to use public market-data snapshots first. If public data is unavailable, rate-limited, or blocked, it falls back to safe preview data instead of exposing private runtime files.
+By default, this public server tries to use public market-data snapshots first. If KIS/OpenDART environment keys are configured, Korean quote and disclosure/fundamental checks use those read-only APIs. If public data is unavailable, rate-limited, or blocked, the server falls back to safe preview data instead of exposing private runtime files.
 
 ## Positioning
 
@@ -37,6 +37,18 @@ In short:
 public stock information lookup + market risk / theme / catalyst / candidate / risk / replay workflow
 ```
 
+## Optional Read-Only Data Sources
+
+The public version can run without private keys, but it becomes stronger when these optional read-only sources are configured on the server:
+
+| Source | Environment variables | Used for | Excluded |
+| --- | --- | --- | --- |
+| KIS Open API | `KIS_APP_KEY`, `KIS_APP_SECRET` | Korean stock quote snapshots and public candidate scans | Account lookup, balance lookup, order submission |
+| OpenDART | `DART_API_KEY` or `OPENDART_API_KEY` | Company overview and major financial accounts | Private documents or non-public data |
+| Yahoo Finance public endpoint | none | Global public quote fallback | Private brokerage data |
+
+KIS integration intentionally uses quotation endpoints only. Trading/account endpoints are not included in this public server.
+
 ## PlayMCP Listing Draft
 
 | Field | Value |
@@ -50,7 +62,7 @@ public stock information lookup + market risk / theme / catalyst / candidate / r
 Description draft:
 
 ```text
-CodexStock Research is a read-only stock research MCP. It combines public market snapshots, sector/theme checks, stock lookup, mover scans, news/catalyst context, candidate discovery, candidate comparison, AI staff viewpoints, risk checks, strategy validation, post-market replay, and learning summaries. It does not provide live order submission, account lookup, tokens, or private trading journals.
+CodexStock Research is a read-only stock research MCP. It combines public market snapshots, optional KIS/OpenDART read-only data, sector/theme checks, stock lookup, mover scans, news/catalyst context, candidate discovery, candidate comparison, AI staff viewpoints, risk checks, strategy validation, post-market replay, and learning summaries. It does not provide live order submission, account lookup, tokens, or private trading journals.
 ```
 
 Conversation examples:
@@ -76,7 +88,7 @@ The public server exposes 20 read-only tools:
 | `stock_snapshot` | Return a redacted quote-style summary |
 | `news_signal_summary` | Summarize public news/signal themes |
 | `catalyst_check` | Check likely public catalysts behind a stock or theme move |
-| `disclosure_financial_summary` | Summarize disclosure/fundamental context |
+| `disclosure_financial_summary` | Summarize disclosure/fundamental context, using OpenDART when configured |
 | `discover_candidates` | Return candidate ideas with reasons |
 | `candidate_compare` | Compare candidates by evidence, risk, and next checks |
 | `explain_candidate` | Explain one candidate's evidence and risks |
@@ -153,7 +165,17 @@ For a hosted PlayMCP endpoint, deploy this folder as a small read-only MCP serve
 
 ## Data Model
 
-By default, the server attempts public market-data snapshots and falls back to safe demo/public-preview data. Set `CODEXSTOCK_PUBLIC_USE_LIVE_DATA=0` to force sample mode. To connect it to a private CodexStock runtime safely, export only redacted JSON snapshots into a separate directory and set:
+By default, the server attempts public market-data snapshots and falls back to safe demo/public-preview data. Set `CODEXSTOCK_PUBLIC_USE_LIVE_DATA=0` to force sample mode.
+
+Optional read-only public data settings:
+
+```powershell
+$env:KIS_APP_KEY="your-kis-app-key"
+$env:KIS_APP_SECRET="your-kis-app-secret"
+$env:DART_API_KEY="your-opendart-api-key"
+```
+
+To connect it to a private CodexStock runtime safely, export only redacted JSON snapshots into a separate directory and set:
 
 ```powershell
 $env:CODEXSTOCK_PUBLIC_DATA_DIR="C:\path\to\redacted_public_snapshots"
