@@ -4,6 +4,7 @@ import json
 import os
 import re
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -98,6 +99,12 @@ def _read_state() -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else DEMO_STATE
 
 
+def _data_mode() -> str:
+    if not PUBLIC_DATA_DIR:
+        return "sample"
+    return str(_read_state().get("data_mode", "delayed"))
+
+
 def _private_key(key: str) -> bool:
     return any(pattern.search(key) for pattern in PRIVATE_PATTERNS)
 
@@ -116,6 +123,13 @@ def _redact(value: Any) -> Any:
 
 
 def _response(payload: dict[str, Any]) -> dict[str, Any]:
+    payload.setdefault("meta", {
+        "data_mode": _data_mode(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_scope": "public_redacted",
+        "investment_action": "disabled",
+        "disclaimer": "Research support only. Not investment advice, not a trade recommendation, and not live order execution.",
+    })
     safe = _redact(payload)
     text = json.dumps(safe, ensure_ascii=False)
     if len(text) > MAX_TEXT:
@@ -159,14 +173,25 @@ def explain_codexstock() -> dict[str, Any]:
 def system_health() -> dict[str, Any]:
     """Return public server health and safety boundaries."""
     state = _read_state()
+    sub_engines = state.get("sub_engines", [])
+    active_engines = [engine for engine in sub_engines if engine.get("status") in {"ready", "optional"}]
     return _response({
         "ok": True,
         "server": "CodexStock Research Public MCP",
-        "mode": "read-only",
-        "as_of": state.get("as_of", "unknown"),
+        "server_status": "online",
+        "data_mode": _data_mode(),
+        "last_data_update": state.get("as_of", "unknown"),
         "tool_count": len(PUBLIC_TOOLS),
         "private_runtime_connected": bool(PUBLIC_DATA_DIR),
+        "sub_engine_count": len(sub_engines),
+        "active_or_optional_sub_engine_count": len(active_engines),
+        "delayed_or_private_only_engines": [
+            engine.get("name") for engine in sub_engines if engine.get("status") not in {"ready", "optional"}
+        ],
         "live_trading_tools": 0,
+        "sensitive_data_access": "blocked",
+        "credential_access": "blocked",
+        "private_journal_access": "blocked",
     })
 
 
@@ -182,7 +207,7 @@ def public_manifest() -> dict[str, Any]:
 
 @mcp.tool()
 def market_brief(market: str = "ALL") -> dict[str, Any]:
-    """Summarize market context for Korea, US, or all markets."""
+    """Summarize the broad market regime, tone, themes, and key risks."""
     state = _read_state()
     return _response({"ok": True, "market": market, "brief": state.get("market_brief", {})})
 
@@ -211,7 +236,7 @@ def stock_snapshot(symbol_or_name: str) -> dict[str, Any]:
 
 @mcp.tool()
 def market_movers(market: str = "ALL", ranking_type: str = "theme_strength") -> dict[str, Any]:
-    """Show public mover-style categories without private account data."""
+    """Show hot-stock or theme movement categories without private account data."""
     candidates = _read_state().get("candidates", [])
     return _response({"ok": True, "market": market, "ranking_type": ranking_type, "items": candidates[:MAX_ITEMS]})
 
@@ -240,14 +265,14 @@ def disclosure_financial_summary(symbol_or_name: str) -> dict[str, Any]:
 
 @mcp.tool()
 def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int = 5) -> dict[str, Any]:
-    """Return public candidate ideas with evidence categories."""
+    """Return CodexStock watch candidates after public evidence filtering."""
     candidates = _read_state().get("candidates", [])[: max(1, min(limit, MAX_ITEMS))]
     return _response({"ok": True, "market": market, "style": style, "candidates": candidates})
 
 
 @mcp.tool()
 def explain_candidate(symbol_or_name: str) -> dict[str, Any]:
-    """Explain why a candidate is being watched and what could invalidate it."""
+    """Explain one watch candidate's evidence, weakness, and invalidation checks."""
     candidate = _find_candidate(symbol_or_name)
     if not candidate:
         return _response({"ok": False, "message": "Candidate not found in public preview data."})
@@ -280,7 +305,7 @@ def ai_staff_opinions(symbol_or_name: str = "market") -> dict[str, Any]:
 
 @mcp.tool()
 def investment_committee(symbol_or_name: str = "market", allocation_percent: float = 0.0) -> dict[str, Any]:
-    """Run a public CodexStock-style investment committee summary."""
+    """Show a public CodexStock-style research committee observation."""
     candidate = _find_candidate(symbol_or_name) or {
         "symbol": symbol_or_name,
         "name": symbol_or_name,
@@ -290,9 +315,9 @@ def investment_committee(symbol_or_name: str = "market", allocation_percent: flo
     risk_level = _risk_level(allocation_percent)
     return _response({
         "ok": True,
-        "mode": "public_read_only_committee",
+        "mode": "public_read_only_research_committee",
         "target": candidate,
-        "chair_summary": "Review candidate strength, catalyst quality, liquidity, risk concentration, and validation evidence before promotion.",
+        "chair_observation": "Review candidate strength, catalyst quality, liquidity, risk concentration, and validation evidence before any private decision process.",
         "staff_votes": [
             {"role": "Research AI", "vote": "watch", "reason": "Evidence exists but source quality must be checked."},
             {"role": "Supply/Demand", "vote": "watch", "reason": "Liquidity and pressure should confirm the theme."},
@@ -300,7 +325,7 @@ def investment_committee(symbol_or_name: str = "market", allocation_percent: flo
             {"role": "Trading", "vote": "blocked", "reason": "Public MCP never sends live orders."},
             {"role": "Risk", "vote": risk_level, "reason": "Allocation and event risk decide whether research can progress."},
         ],
-        "final_decision": "research_watch_only",
+        "research_opinion": "watch_only_no_trade_recommendation",
         "next_checks": ["fresh market data", "news catalyst", "sector confirmation", "risk gate", "paper/replay validation"],
     })
 

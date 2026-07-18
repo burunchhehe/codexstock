@@ -4,6 +4,8 @@ This folder contains a public, read-only PlayMCP-ready version of CodexStock.
 
 It is intentionally separate from the private CodexStock runtime. It does not expose live trading, account lookup, order submission, tokens, private journals, or personal strategy rules.
 
+> CodexStock Research is an investment research support service. It does not provide investment advisory service, trade recommendation, discretionary trading, or live order execution. All outputs are for research reference only, and investment decisions remain the user's responsibility.
+
 ## Positioning
 
 Most stock MCP servers answer questions like:
@@ -81,6 +83,36 @@ The public server exposes 20 read-only tools:
 | `learning_summary` | Summarize what the system learned |
 | `sub_engine_status` | Show public sub-engine readiness |
 
+## Tool Role Boundaries
+
+Some tools may sound similar, so their roles are intentionally separated:
+
+| Tool | Boundary |
+| --- | --- |
+| `market_brief` | Broad market regime, tone, themes, and risk events |
+| `market_movers` | Hot-stock or theme movement categories |
+| `discover_candidates` | CodexStock watch candidates after public evidence filtering |
+| `explain_candidate` | Detailed evidence and invalidation checks for one candidate |
+| `investment_committee` | Research-only committee observation, not a buy/sell recommendation |
+
+## Response Metadata
+
+Every tool response includes safety metadata:
+
+```json
+{
+  "meta": {
+    "data_mode": "sample | delayed | live_public",
+    "generated_at": "ISO-8601 timestamp",
+    "source_scope": "public_redacted",
+    "investment_action": "disabled",
+    "disclaimer": "Research support only. Not investment advice, not a trade recommendation, and not live order execution."
+  }
+}
+```
+
+When `data_mode` is `sample`, outputs are public examples and must not be interpreted as current market results.
+
 ## Local Run
 
 Install dependencies in an isolated environment:
@@ -115,4 +147,3 @@ The public server should only read curated files from that directory. Never poin
 - No private journal raw text
 - No profit guarantee language
 - Responses are compact and designed to stay under PlayMCP response limits
-
