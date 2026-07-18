@@ -1,0 +1,29 @@
+{
+  "as_of": "demo",
+  "market_brief": {
+    "summary": "Public preview mode. Connect redacted market snapshots to show live context.",
+    "focus": ["market regime", "liquidity", "theme strength", "risk events"]
+  },
+  "candidates": [
+    {
+      "symbol": "DEMO1",
+      "name": "Demo Candidate A",
+      "market": "KR",
+      "reason": "Momentum, liquidity, and repeated external signals are aligned in the sample data.",
+      "risk": "Public preview only. Not investment advice."
+    },
+    {
+      "symbol": "DEMO2",
+      "name": "Demo Candidate B",
+      "market": "US",
+      "reason": "Large-cap theme and news context are aligned in the sample data.",
+      "risk": "Needs strategy validation and risk review before any real decision."
+    }
+  ],
+  "sub_engines": [
+    {"name": "Research Forge", "status": "ready", "role": "walk-forward validation and replay evidence"},
+    {"name": "External Signal Scout", "status": "ready", "role": "public signal collection and theme summaries"},
+    {"name": "KIS Gateway", "status": "private-only", "role": "broker adapter excluded from public MCP"}
+  ]
+}
+

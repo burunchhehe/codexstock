@@ -59,6 +59,7 @@ CodexStock was built around one question: how can a personal investor turn scatt
 
 See [docs/FEATURES.md](docs/FEATURES.md) for a fuller feature map.
 See [docs/SUB_ENGINES.md](docs/SUB_ENGINES.md) for the sub-engine strategy.
+See [playmcp-public-version/](playmcp-public-version/) for the PlayMCP-ready public read-only MCP preview.
 
 ## Actual UI Screenshots
 
