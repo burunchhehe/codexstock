@@ -45,7 +45,17 @@ The goal is not to claim guaranteed returns. The goal is to make the research, d
 See [docs/FEATURES.md](docs/FEATURES.md) for a fuller feature map.
 See [docs/SUB_ENGINES.md](docs/SUB_ENGINES.md) for the sub-engine strategy.
 
-## Public Demo Screens
+## Actual UI Screenshots
+
+These are selected real CodexStock UI captures. They were included because they do not show account numbers, balances, tokens, private journals, live positions, or real order/fill logs.
+
+![CodexStock module navigation cards](docs/images/actual-ui-module-cards.png)
+
+![CodexStock dashboard page menu](docs/images/actual-ui-dashboard-menu.png)
+
+![CodexStock AI trader command window](docs/images/actual-ui-ai-command.png)
+
+## Public Structure Diagrams
 
 These are synthetic structure-only demo images. They do not show real accounts, real positions, real order history, private journals, or personal runtime data.
 
