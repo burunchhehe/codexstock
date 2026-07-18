@@ -15,12 +15,33 @@ MAX_ITEMS = 8
 MAX_TEXT = 12000
 PUBLIC_DATA_DIR = os.environ.get("CODEXSTOCK_PUBLIC_DATA_DIR")
 
-
 PRIVATE_PATTERNS = [
     re.compile(r"\b\d{8,14}\b"),
-    re.compile(r"(appkey|appsecret|token|authorization|계좌|account)", re.IGNORECASE),
+    re.compile(r"(appkey|appsecret|token|authorization|account|balance|order|fill)", re.IGNORECASE),
 ]
 
+PUBLIC_TOOLS = [
+    "explain_codexstock",
+    "system_health",
+    "public_manifest",
+    "market_brief",
+    "resolve_stock",
+    "stock_snapshot",
+    "market_movers",
+    "news_signal_summary",
+    "disclosure_financial_summary",
+    "discover_candidates",
+    "explain_candidate",
+    "risk_check",
+    "ai_staff_opinions",
+    "investment_committee",
+    "daily_operations_plan",
+    "strategy_validation_summary",
+    "post_market_review",
+    "missed_stock_review",
+    "learning_summary",
+    "sub_engine_status",
+]
 
 DEMO_STATE: dict[str, Any] = {
     "as_of": "public-preview",
@@ -48,6 +69,7 @@ DEMO_STATE: dict[str, Any] = {
     "staff": [
         {"name": "Research AI", "view": "Checks evidence quality and market context.", "stance": "watch"},
         {"name": "Supply/Demand Researcher", "view": "Checks liquidity and pressure.", "stance": "watch"},
+        {"name": "Fundamental Researcher", "view": "Checks disclosure and financial context.", "stance": "watch"},
         {"name": "Strategy Researcher", "view": "Requires replay and walk-forward evidence.", "stance": "caution"},
         {"name": "Trading AI", "view": "Builds a plan only after risk approval.", "stance": "blocked for public MCP"},
         {"name": "Risk Manager", "view": "Blocks live execution in public mode.", "stance": "block"},
@@ -73,9 +95,11 @@ def _read_state() -> dict[str, Any]:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return DEMO_STATE
-    if not isinstance(loaded, dict):
-        return DEMO_STATE
-    return loaded
+    return loaded if isinstance(loaded, dict) else DEMO_STATE
+
+
+def _private_key(key: str) -> bool:
+    return any(pattern.search(key) for pattern in PRIVATE_PATTERNS)
 
 
 def _redact(value: Any) -> Any:
@@ -91,15 +115,11 @@ def _redact(value: Any) -> Any:
     return value
 
 
-def _private_key(key: str) -> bool:
-    return any(pattern.search(key) for pattern in PRIVATE_PATTERNS)
-
-
 def _response(payload: dict[str, Any]) -> dict[str, Any]:
     safe = _redact(payload)
     text = json.dumps(safe, ensure_ascii=False)
     if len(text) > MAX_TEXT:
-        safe = {"ok": True, "truncated": True, "summary": text[:MAX_TEXT]}
+        return {"ok": True, "truncated": True, "summary": text[:MAX_TEXT]}
     return safe
 
 
@@ -112,12 +132,25 @@ def _find_candidate(symbol_or_name: str) -> dict[str, Any] | None:
     return None
 
 
+def _risk_level(allocation_percent: float) -> str:
+    if allocation_percent <= 30:
+        return "green"
+    if allocation_percent <= 50:
+        return "yellow"
+    return "red"
+
+
 @mcp.tool()
 def explain_codexstock() -> dict[str, Any]:
     """Explain what CodexStock Research provides in public read-only mode."""
     return _response({
         "ok": True,
         "positioning": "Stock information lookup plus CodexStock research, risk, replay, and learning workflow.",
+        "public_value": [
+            "turns raw market information into candidate evidence",
+            "shows AI staff disagreement instead of one opaque answer",
+            "keeps live trading and private account data out of the public MCP",
+        ],
         "not_included": ["live order submission", "account lookup", "tokens", "private journals", "raw live trading logs"],
     })
 
@@ -131,7 +164,7 @@ def system_health() -> dict[str, Any]:
         "server": "CodexStock Research Public MCP",
         "mode": "read-only",
         "as_of": state.get("as_of", "unknown"),
-        "tool_count": 18,
+        "tool_count": len(PUBLIC_TOOLS),
         "private_runtime_connected": bool(PUBLIC_DATA_DIR),
         "live_trading_tools": 0,
     })
@@ -142,13 +175,7 @@ def public_manifest() -> dict[str, Any]:
     """List public tools and state what is intentionally excluded."""
     return _response({
         "ok": True,
-        "tools": [
-            "explain_codexstock", "system_health", "public_manifest", "market_brief",
-            "resolve_stock", "stock_snapshot", "market_movers", "news_signal_summary",
-            "disclosure_financial_summary", "discover_candidates", "explain_candidate",
-            "risk_check", "ai_staff_opinions", "strategy_validation_summary",
-            "post_market_review", "missed_stock_review", "learning_summary", "sub_engine_status",
-        ],
+        "tools": PUBLIC_TOOLS,
         "excluded": ["orders", "account balances", "credentials", "private logs"],
     })
 
@@ -195,7 +222,7 @@ def news_signal_summary(symbol_or_theme: str = "market") -> dict[str, Any]:
     return _response({
         "ok": True,
         "target": symbol_or_theme,
-        "summary": "Public preview: combine repeated sources, theme strength, and risk flags before candidate promotion.",
+        "summary": "Combine repeated sources, theme strength, and risk flags before candidate promotion.",
         "checks": ["source repetition", "recency", "theme relevance", "risk language", "overlap with movers"],
     })
 
@@ -206,7 +233,7 @@ def disclosure_financial_summary(symbol_or_name: str) -> dict[str, Any]:
     return _response({
         "ok": True,
         "target": symbol_or_name,
-        "summary": "Public preview: disclosure and financial context should be checked before promotion.",
+        "summary": "Disclosure and financial context should be checked before promotion.",
         "checks": ["recent filings", "revenue trend", "profitability", "debt/liquidity", "one-off events"],
     })
 
@@ -235,12 +262,11 @@ def explain_candidate(symbol_or_name: str) -> dict[str, Any]:
 @mcp.tool()
 def risk_check(symbol_or_name: str, allocation_percent: float = 0.0) -> dict[str, Any]:
     """Explain public risk checks for a symbol or allocation."""
-    level = "green" if allocation_percent <= 30 else "yellow" if allocation_percent <= 50 else "red"
     return _response({
         "ok": True,
         "target": symbol_or_name,
         "allocation_percent": allocation_percent,
-        "risk_level": level,
+        "risk_level": _risk_level(allocation_percent),
         "checks": ["concentration", "liquidity", "drawdown", "event risk", "public-mode live trading block"],
         "decision": "research_only_public_mcp",
     })
@@ -250,6 +276,51 @@ def risk_check(symbol_or_name: str, allocation_percent: float = 0.0) -> dict[str
 def ai_staff_opinions(symbol_or_name: str = "market") -> dict[str, Any]:
     """Show public AI staff viewpoints."""
     return _response({"ok": True, "target": symbol_or_name, "staff": _read_state().get("staff", [])})
+
+
+@mcp.tool()
+def investment_committee(symbol_or_name: str = "market", allocation_percent: float = 0.0) -> dict[str, Any]:
+    """Run a public CodexStock-style investment committee summary."""
+    candidate = _find_candidate(symbol_or_name) or {
+        "symbol": symbol_or_name,
+        "name": symbol_or_name,
+        "reason": "No exact public candidate match. Treat as a watch-only research request.",
+        "risk": "Insufficient public evidence.",
+    }
+    risk_level = _risk_level(allocation_percent)
+    return _response({
+        "ok": True,
+        "mode": "public_read_only_committee",
+        "target": candidate,
+        "chair_summary": "Review candidate strength, catalyst quality, liquidity, risk concentration, and validation evidence before promotion.",
+        "staff_votes": [
+            {"role": "Research AI", "vote": "watch", "reason": "Evidence exists but source quality must be checked."},
+            {"role": "Supply/Demand", "vote": "watch", "reason": "Liquidity and pressure should confirm the theme."},
+            {"role": "Strategy", "vote": "caution", "reason": "Needs replay, cost, and out-of-sample validation."},
+            {"role": "Trading", "vote": "blocked", "reason": "Public MCP never sends live orders."},
+            {"role": "Risk", "vote": risk_level, "reason": "Allocation and event risk decide whether research can progress."},
+        ],
+        "final_decision": "research_watch_only",
+        "next_checks": ["fresh market data", "news catalyst", "sector confirmation", "risk gate", "paper/replay validation"],
+    })
+
+
+@mcp.tool()
+def daily_operations_plan(session: str = "today") -> dict[str, Any]:
+    """Show the CodexStock daily operating loop in public-preview form."""
+    return _response({
+        "ok": True,
+        "session": session,
+        "routine": [
+            {"time": "pre-market", "focus": "overnight issues, US market tone, macro events, watchlist preparation"},
+            {"time": "market open", "focus": "movers, liquidity, theme strength, candidate review"},
+            {"time": "midday", "focus": "morning leaders, weak sectors, risk reset, afternoon plan"},
+            {"time": "pre-close", "focus": "position/risk review, missed opportunities, closing strength"},
+            {"time": "post-market", "focus": "10/30/50 replay, trade reasons, missed-name review, learning notes"},
+            {"time": "night/weekend", "focus": "heavy research, strategy validation, sub-engine jobs, documentation"},
+        ],
+        "public_note": "This public MCP describes the workflow only. It does not operate a user account or send orders.",
+    })
 
 
 @mcp.tool()
@@ -310,4 +381,3 @@ if __name__ == "__main__":
     # Default stdio is useful for local MCP smoke tests. A hosted PlayMCP deployment
     # should run this server with the MCP SDK's HTTP/streamable transport.
     mcp.run()
-

@@ -19,13 +19,15 @@ CodexStock Research should also answer:
 - Which evidence supports or weakens the candidate?
 - What does the AI staff think?
 - What did the risk gate block or allow?
+- What would the investment committee conclude?
+- What does the daily operating loop do before, during, and after the market?
 - What did the replay/review loop learn?
 - Which sub-engines produced evidence?
 
 In short:
 
 ```text
-stock information lookup + CodexStock research / risk / replay workflow
+stock information lookup + CodexStock research / risk / committee / replay workflow
 ```
 
 ## PlayMCP Listing Draft
@@ -35,26 +37,26 @@ stock information lookup + CodexStock research / risk / replay workflow
 | MCP name | `CodexStock Research` |
 | MCP identifier | `codexstock` |
 | Auth | No auth for the public read-only preview |
-| Tool count | 18 |
+| Tool count | 20 |
 | Representative image | `assets/playmcp-codexstock-stock-research.png` |
 
-Description:
+Description draft:
 
 ```text
-CodexStock Research는 단순 주식 시세 조회 MCP가 아니라, 시장 요약, 후보 발굴, AI 직원 검토, 리스크 점검, 전략 검증, 장마감 복기, 학습 요약을 연결해 개인 투자 연구 과정을 운영하는 읽기 전용 MCP입니다. 실전 주문, 계좌 조회, 토큰, 개인 매매일지 원문은 제공하지 않습니다.
+CodexStock Research is not just a stock quote MCP. It is a read-only investment research MCP that connects market brief, candidate discovery, AI staff review, risk checks, strategy validation, investment committee summaries, post-market replay, learning summaries, and sub-engine status. It does not provide live order submission, account lookup, tokens, or private trading journals.
 ```
 
 Conversation examples:
 
 ```text
-코덱스스톡 오늘 시장 요약해줘
-후보 종목과 리스크 근거 보여줘
-AI 직원들이 지금 뭘 보는지 알려줘
+Summarize today's market with CodexStock
+Show candidate stocks and risk evidence
+What are the AI staff watching now?
 ```
 
 ## Public Tool Surface
 
-The public server exposes 18 read-only tools:
+The public server exposes 20 read-only tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -71,6 +73,8 @@ The public server exposes 18 read-only tools:
 | `explain_candidate` | Explain one candidate's evidence and risks |
 | `risk_check` | Run a public risk explanation |
 | `ai_staff_opinions` | Show AI staff viewpoints |
+| `investment_committee` | Show a CodexStock-style committee decision with staff votes |
+| `daily_operations_plan` | Show the daily operating loop from pre-market to post-market replay |
 | `strategy_validation_summary` | Summarize strategy validation status |
 | `post_market_review` | Summarize replay/review output |
 | `missed_stock_review` | Explain missed-name review examples |
