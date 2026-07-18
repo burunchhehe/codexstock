@@ -45,26 +45,26 @@ PRIVATE_PATTERNS = [
 ]
 
 PUBLIC_TOOLS = [
-    "explain_codexstock",
     "system_health",
-    "public_manifest",
     "market_brief",
+    "market_risk_events",
+    "sector_theme_brief",
+    "market_movers",
     "resolve_stock",
     "stock_snapshot",
-    "market_movers",
     "news_signal_summary",
+    "catalyst_check",
     "disclosure_financial_summary",
     "discover_candidates",
+    "candidate_compare",
     "explain_candidate",
     "risk_check",
+    "watchlist_plan",
     "ai_staff_opinions",
     "investment_committee",
-    "daily_operations_plan",
     "strategy_validation_summary",
     "post_market_review",
-    "missed_stock_review",
     "learning_summary",
-    "sub_engine_status",
 ]
 
 DEMO_STATE: dict[str, Any] = {
@@ -74,6 +74,14 @@ DEMO_STATE: dict[str, Any] = {
         "focus": ["market regime", "liquidity", "theme strength", "risk events"],
         "warning": "This is research software, not investment advice.",
     },
+    "risk_events": [
+        {"event": "macro calendar", "risk": "Check rates, CPI, FX, and major central-bank events."},
+        {"event": "market flow", "risk": "Check foreign/institutional flow and index breadth."},
+    ],
+    "themes": [
+        {"theme": "AI infrastructure", "strength": "watch", "evidence": ["large-cap attention", "repeated news themes"]},
+        {"theme": "shipbuilding/energy", "strength": "watch", "evidence": ["order-cycle headlines", "sector rotation checks"]},
+    ],
     "candidates": [
         {
             "symbol": "DEMO1",
@@ -178,21 +186,6 @@ def _risk_level(allocation_percent: float) -> str:
 
 
 @mcp.tool()
-def explain_codexstock() -> dict[str, Any]:
-    """Explain what CodexStock Research provides in public read-only mode."""
-    return _response({
-        "ok": True,
-        "positioning": "Stock information lookup plus CodexStock research, risk, replay, and learning workflow.",
-        "public_value": [
-            "turns raw market information into candidate evidence",
-            "shows AI staff disagreement instead of one opaque answer",
-            "keeps live trading and private account data out of the public MCP",
-        ],
-        "not_included": ["live order submission", "account lookup", "tokens", "private journals", "raw live trading logs"],
-    })
-
-
-@mcp.tool()
 def system_health() -> dict[str, Any]:
     """Return public server health and safety boundaries."""
     state = _read_state()
@@ -219,20 +212,35 @@ def system_health() -> dict[str, Any]:
 
 
 @mcp.tool()
-def public_manifest() -> dict[str, Any]:
-    """List public tools and state what is intentionally excluded."""
-    return _response({
-        "ok": True,
-        "tools": PUBLIC_TOOLS,
-        "excluded": ["orders", "account balances", "credentials", "private logs"],
-    })
-
-
-@mcp.tool()
 def market_brief(market: str = "ALL") -> dict[str, Any]:
     """Summarize the broad market regime, tone, themes, and key risks."""
     state = _read_state()
     return _response({"ok": True, "market": market, "brief": state.get("market_brief", {})})
+
+
+@mcp.tool()
+def market_risk_events(market: str = "ALL") -> dict[str, Any]:
+    """Summarize macro, flow, calendar, and event risks to watch today."""
+    state = _read_state()
+    return _response({
+        "ok": True,
+        "market": market,
+        "risk_events": state.get("risk_events", DEMO_STATE["risk_events"]),
+        "how_to_use": "Use this before candidate promotion to avoid ignoring market-wide risk.",
+    })
+
+
+@mcp.tool()
+def sector_theme_brief(market: str = "ALL", limit: int = 5) -> dict[str, Any]:
+    """Summarize strong sectors, themes, and evidence categories."""
+    state = _read_state()
+    themes = state.get("themes", DEMO_STATE["themes"])[: max(1, min(limit, MAX_ITEMS))]
+    return _response({
+        "ok": True,
+        "market": market,
+        "themes": themes,
+        "how_to_use": "Compare candidate stocks against active themes before watchlist promotion.",
+    })
 
 
 @mcp.tool()
@@ -276,6 +284,25 @@ def news_signal_summary(symbol_or_theme: str = "market") -> dict[str, Any]:
 
 
 @mcp.tool()
+def catalyst_check(symbol_or_name: str) -> dict[str, Any]:
+    """Check likely public catalysts behind a stock or theme move."""
+    candidate = _find_candidate(symbol_or_name)
+    target = candidate or {"symbol": symbol_or_name, "name": symbol_or_name}
+    return _response({
+        "ok": True,
+        "target": target,
+        "likely_catalyst_checks": [
+            "fresh news or disclosure",
+            "sector/theme rotation",
+            "unusual liquidity or trading value",
+            "macro-sensitive move",
+            "external signal repetition",
+        ],
+        "research_note": "Treat catalyst results as hypotheses until source quality and timing are verified.",
+    })
+
+
+@mcp.tool()
 def disclosure_financial_summary(symbol_or_name: str) -> dict[str, Any]:
     """Summarize disclosure and fundamental context in public-preview form."""
     return _response({
@@ -291,6 +318,26 @@ def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int
     """Return CodexStock watch candidates after public evidence filtering."""
     candidates = _read_state().get("candidates", [])[: max(1, min(limit, MAX_ITEMS))]
     return _response({"ok": True, "market": market, "style": style, "candidates": candidates})
+
+
+@mcp.tool()
+def candidate_compare(symbols_or_names: str, market: str = "ALL") -> dict[str, Any]:
+    """Compare multiple public watch candidates by evidence, risk, and next checks."""
+    names = [part.strip() for part in re.split(r"[,/|]", symbols_or_names) if part.strip()]
+    compared = []
+    for name in names[:MAX_ITEMS]:
+        candidate = _find_candidate(name) or {"symbol": name, "name": name, "reason": "No public candidate match.", "risk": "Needs evidence."}
+        compared.append({
+            "candidate": candidate,
+            "strength_checks": ["theme fit", "liquidity", "catalyst clarity", "risk level"],
+            "research_status": "watch_only_no_trade_recommendation",
+        })
+    return _response({
+        "ok": True,
+        "market": market,
+        "compared": compared,
+        "how_to_use": "Use comparison to decide what deserves deeper private research, not to issue a trade.",
+    })
 
 
 @mcp.tool()
@@ -317,6 +364,29 @@ def risk_check(symbol_or_name: str, allocation_percent: float = 0.0) -> dict[str
         "risk_level": _risk_level(allocation_percent),
         "checks": ["concentration", "liquidity", "drawdown", "event risk", "public-mode live trading block"],
         "decision": "research_only_public_mcp",
+    })
+
+
+@mcp.tool()
+def watchlist_plan(symbol_or_name: str = "market", horizon: str = "today") -> dict[str, Any]:
+    """Create a public watchlist plan with keep/drop conditions."""
+    return _response({
+        "ok": True,
+        "target": symbol_or_name,
+        "horizon": horizon,
+        "keep_watching_if": [
+            "theme remains active",
+            "liquidity confirms interest",
+            "news catalyst remains fresh",
+            "risk level stays acceptable",
+        ],
+        "drop_or_deprioritize_if": [
+            "volume fades",
+            "theme leadership rotates away",
+            "risk event dominates the market",
+            "candidate fails validation or replay checks",
+        ],
+        "action_boundary": "Public MCP creates a research watch plan only. No trade instruction is produced.",
     })
 
 
@@ -354,24 +424,6 @@ def investment_committee(symbol_or_name: str = "market", allocation_percent: flo
 
 
 @mcp.tool()
-def daily_operations_plan(session: str = "today") -> dict[str, Any]:
-    """Show the CodexStock daily operating loop in public-preview form."""
-    return _response({
-        "ok": True,
-        "session": session,
-        "routine": [
-            {"time": "pre-market", "focus": "overnight issues, US market tone, macro events, watchlist preparation"},
-            {"time": "market open", "focus": "movers, liquidity, theme strength, candidate review"},
-            {"time": "midday", "focus": "morning leaders, weak sectors, risk reset, afternoon plan"},
-            {"time": "pre-close", "focus": "position/risk review, missed opportunities, closing strength"},
-            {"time": "post-market", "focus": "10/30/50 replay, trade reasons, missed-name review, learning notes"},
-            {"time": "night/weekend", "focus": "heavy research, strategy validation, sub-engine jobs, documentation"},
-        ],
-        "public_note": "This public MCP describes the workflow only. It does not operate a user account or send orders.",
-    })
-
-
-@mcp.tool()
 def strategy_validation_summary(strategy_name: str = "public-preview") -> dict[str, Any]:
     """Summarize strategy validation status without private performance claims."""
     return _response({
@@ -400,16 +452,6 @@ def post_market_review(date: str = "latest") -> dict[str, Any]:
 
 
 @mcp.tool()
-def missed_stock_review(date: str = "latest") -> dict[str, Any]:
-    """Explain the missed-stock review workflow."""
-    return _response({
-        "ok": True,
-        "date": date,
-        "workflow": ["find strong movers", "match catalysts", "compare against radar inputs", "record missed trigger", "create next-session rule"],
-    })
-
-
-@mcp.tool()
 def learning_summary(period: str = "latest") -> dict[str, Any]:
     """Summarize public learning-loop output."""
     return _response({
@@ -417,12 +459,6 @@ def learning_summary(period: str = "latest") -> dict[str, Any]:
         "period": period,
         "learning_loop": ["journal", "replay", "missed-name review", "rule candidate", "validation before promotion"],
     })
-
-
-@mcp.tool()
-def sub_engine_status() -> dict[str, Any]:
-    """Show public sub-engine readiness and roles."""
-    return _response({"ok": True, "sub_engines": _read_state().get("sub_engines", [])})
 
 
 if __name__ == "__main__":

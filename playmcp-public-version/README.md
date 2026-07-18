@@ -21,15 +21,18 @@ CodexStock Research should also answer:
 - Which evidence supports or weakens the candidate?
 - What does the AI staff think?
 - What did the risk gate block or allow?
-- What would the investment committee conclude?
-- What does the daily operating loop do before, during, and after the market?
+- What market risks should be checked first?
+- Which sectors and themes are active?
+- What catalyst might explain a move?
+- Which candidate is stronger after comparison?
+- What conditions keep a name on the watchlist?
+- What would the research committee observe?
 - What did the replay/review loop learn?
-- Which sub-engines produced evidence?
 
 In short:
 
 ```text
-stock information lookup + CodexStock research / risk / committee / replay workflow
+stock information lookup + market risk / theme / catalyst / candidate / risk / replay workflow
 ```
 
 ## PlayMCP Listing Draft
@@ -45,15 +48,15 @@ stock information lookup + CodexStock research / risk / committee / replay workf
 Description draft:
 
 ```text
-CodexStock Research is not just a stock quote MCP. It is a read-only investment research MCP that connects market brief, candidate discovery, AI staff review, risk checks, strategy validation, investment committee summaries, post-market replay, learning summaries, and sub-engine status. It does not provide live order submission, account lookup, tokens, or private trading journals.
+CodexStock Research is not just a stock quote MCP. It is a read-only investment research MCP that connects market brief, risk events, sector/theme strength, catalysts, candidate discovery, candidate comparison, AI staff review, risk checks, strategy validation, post-market replay, and learning summaries. It does not provide live order submission, account lookup, tokens, or private trading journals.
 ```
 
 Conversation examples:
 
 ```text
-Summarize today's market with CodexStock
-Show candidate stocks and risk evidence
-What are the AI staff watching now?
+What sectors and themes are strong today?
+Compare these candidate stocks by evidence and risk
+Why did this stock move and should I keep watching it?
 ```
 
 ## Public Tool Surface
@@ -62,26 +65,26 @@ The public server exposes 20 read-only tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `explain_codexstock` | Explain what CodexStock Research is |
 | `system_health` | Return safe public server status |
-| `public_manifest` | List public tools and safety boundaries |
 | `market_brief` | Summarize market context |
+| `market_risk_events` | Summarize macro, flow, calendar, and event risks |
+| `sector_theme_brief` | Summarize strong sectors, themes, and evidence categories |
+| `market_movers` | Show mover categories without private data |
 | `resolve_stock` | Resolve a stock name or code in a lightweight way |
 | `stock_snapshot` | Return a redacted quote-style summary |
-| `market_movers` | Show mover categories without private data |
 | `news_signal_summary` | Summarize public news/signal themes |
+| `catalyst_check` | Check likely public catalysts behind a stock or theme move |
 | `disclosure_financial_summary` | Summarize disclosure/fundamental context |
 | `discover_candidates` | Return candidate ideas with reasons |
+| `candidate_compare` | Compare candidates by evidence, risk, and next checks |
 | `explain_candidate` | Explain one candidate's evidence and risks |
 | `risk_check` | Run a public risk explanation |
+| `watchlist_plan` | Create keep/drop watchlist conditions |
 | `ai_staff_opinions` | Show AI staff viewpoints |
-| `investment_committee` | Show a CodexStock-style committee decision with staff votes |
-| `daily_operations_plan` | Show the daily operating loop from pre-market to post-market replay |
+| `investment_committee` | Show a CodexStock-style research committee observation |
 | `strategy_validation_summary` | Summarize strategy validation status |
 | `post_market_review` | Summarize replay/review output |
-| `missed_stock_review` | Explain missed-name review examples |
 | `learning_summary` | Summarize what the system learned |
-| `sub_engine_status` | Show public sub-engine readiness |
 
 ## Tool Role Boundaries
 
@@ -90,9 +93,13 @@ Some tools may sound similar, so their roles are intentionally separated:
 | Tool | Boundary |
 | --- | --- |
 | `market_brief` | Broad market regime, tone, themes, and risk events |
+| `market_risk_events` | Macro, flow, calendar, and event risks to check before research |
+| `sector_theme_brief` | Sector/theme strength, not individual stock endorsement |
 | `market_movers` | Hot-stock or theme movement categories |
 | `discover_candidates` | CodexStock watch candidates after public evidence filtering |
+| `candidate_compare` | Relative research comparison between watch candidates |
 | `explain_candidate` | Detailed evidence and invalidation checks for one candidate |
+| `watchlist_plan` | Keep/drop research conditions for monitoring |
 | `investment_committee` | Research-only committee observation, not a buy/sell recommendation |
 
 ## Response Metadata

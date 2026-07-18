@@ -16,27 +16,27 @@ Use these values on the PlayMCP registration page.
 English draft:
 
 ```text
-CodexStock Research is not just a stock quote MCP. It is a read-only investment research MCP that connects market brief, candidate discovery, AI staff review, risk checks, strategy validation, investment committee summaries, post-market replay, learning summaries, and sub-engine status. It does not provide live order submission, account lookup, tokens, or private trading journals.
+CodexStock Research is not just a stock quote MCP. It is a read-only investment research MCP that connects market brief, risk events, sector/theme strength, catalysts, candidate discovery, candidate comparison, AI staff review, risk checks, strategy validation, post-market replay, and learning summaries. It does not provide live order submission, account lookup, tokens, or private trading journals.
 ```
 
 Korean draft for the PlayMCP form:
 
 ```text
-CodexStock Research는 단순 주식 시세 조회 MCP가 아니라, 시장 요약, 후보 발굴, AI 직원 검토, 리스크 점검, 전략 검증, 투자위원회 요약, 장마감 복기, 학습 요약, 하위엔진 상태를 연결하는 읽기 전용 투자 연구 MCP입니다. 실전 주문, 계좌 조회, 토큰, 개인 매매일지 원문은 제공하지 않습니다.
+CodexStock Research는 단순 주식 시세 조회 MCP가 아니라, 시장 요약, 위험 이벤트, 업종·테마 강도, 재료 점검, 후보 발굴, 후보 비교, AI 직원 검토, 리스크 점검, 전략 검증, 장마감 복기, 학습 요약을 연결하는 읽기 전용 투자 연구 MCP입니다. 실전 주문, 계좌 조회, 토큰, 개인 매매일지 원문은 제공하지 않습니다.
 ```
 
 ## Conversation Examples
 
 ```text
-코덱스스톡 오늘 시장 요약해줘
+오늘 강한 업종과 테마 알려줘
 ```
 
 ```text
-후보 종목과 리스크 근거 보여줘
+후보 종목들을 근거와 리스크로 비교해줘
 ```
 
 ```text
-투자위원회 연구 관찰 의견 보여줘
+이 종목이 왜 움직였는지 재료 점검해줘
 ```
 
 ## Safety Notice

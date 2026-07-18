@@ -22,16 +22,24 @@ def _literal_public_tools() -> list[str]:
 def main() -> None:
     tools = _literal_public_tools()
     assert len(tools) == 20, f"expected 20 tools, got {len(tools)}"
+    assert "explain_codexstock" not in tools
+    assert "public_manifest" not in tools
+    assert "daily_operations_plan" not in tools
+    assert "missed_stock_review" not in tools
+    assert "sub_engine_status" not in tools
+    assert "market_risk_events" in tools
+    assert "sector_theme_brief" in tools
+    assert "catalyst_check" in tools
+    assert "candidate_compare" in tools
+    assert "watchlist_plan" in tools
     assert "investment_committee" in tools
-    assert "daily_operations_plan" in tools
     source = SERVER.read_text(encoding="utf-8")
     assert "investment_action" in source
     assert "disabled" in source
     assert "Not investment advice" in source
-    assert "live order submission" in source
+    assert "live order execution" in source
     print("public contract smoke test passed")
 
 
 if __name__ == "__main__":
     main()
-
