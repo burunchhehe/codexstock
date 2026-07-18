@@ -4,6 +4,8 @@ CodexStock is a local-first AI investment research, validation, and trading-oper
 
 It combines market monitoring, candidate discovery, strategy research, paper/live separation, AI staff reviews, MCP access, post-market replay, and safety-first trade reconciliation into one personal workstation.
 
+Created and maintained by **Jinwoo Kim** (`burunchhehe`).
+
 > This repository is a public evaluation build. It contains source code and non-confidential documentation only. It does not contain API keys, account numbers, live order logs, private journals, runtime databases, or personal trading records.
 
 ## Why It Exists

@@ -4,6 +4,8 @@ This release is intended for public technical review of CodexStock's architectur
 workflow, safety model, and research direction without publishing the owner's private
 runtime.
 
+Project creator and maintainer: **Jinwoo Kim** (`burunchhehe`).
+
 ## Included
 
 - Local app and MCP bridge source code
