@@ -1263,7 +1263,7 @@ def _risk_level(allocation_percent: float) -> str:
 
 @mcp.tool()
 def system_health(ctx: Context = None) -> dict[str, Any]:
-    """Return public server health and safety boundaries."""
+    """공개 서버 상태, 데이터 연결 상태, 사용자별 인증 여부, 안전 차단 범위, 실전 주문 비활성 여부를 확인합니다."""
     state = _read_state()
     sub_engines = state.get("sub_engines", [])
     active_engines = [engine for engine in sub_engines if engine.get("status") in {"ready", "optional"}]
@@ -1303,7 +1303,7 @@ def system_health(ctx: Context = None) -> dict[str, Any]:
 
 @mcp.tool()
 def market_brief(market: str = "ALL", ctx: Context = None) -> dict[str, Any]:
-    """Summarize the broad market regime, tone, themes, and key risks."""
+    """시장 분위기, 지수 방향, 환율, 주요 테마와 위험 요인을 공개 데이터 기준으로 요약합니다."""
     state = _read_state()
     live_brief = _live_market_brief(market, ctx)
     return _response({
@@ -1316,7 +1316,7 @@ def market_brief(market: str = "ALL", ctx: Context = None) -> dict[str, Any]:
 
 @mcp.tool()
 def market_risk_events(market: str = "ALL") -> dict[str, Any]:
-    """Summarize macro, flow, calendar, and event risks to watch today."""
+    """오늘 확인해야 할 거시경제, 수급, 일정, 이벤트 위험을 정리합니다."""
     state = _read_state()
     return _response({
         "ok": True,
@@ -1328,7 +1328,7 @@ def market_risk_events(market: str = "ALL") -> dict[str, Any]:
 
 @mcp.tool()
 def sector_theme_brief(market: str = "ALL", limit: int = 5) -> dict[str, Any]:
-    """Summarize strong sectors, themes, and evidence categories."""
+    """강한 업종과 테마, 관련 근거 범주를 요약합니다."""
     state = _read_state()
     themes = state.get("themes", DEMO_STATE["themes"])[: max(1, min(limit, MAX_ITEMS))]
     return _response({
@@ -1341,7 +1341,7 @@ def sector_theme_brief(market: str = "ALL", limit: int = 5) -> dict[str, Any]:
 
 @mcp.tool()
 def resolve_stock(query: str, market: str = "ALL", limit: int = 5, ctx: Context = None) -> dict[str, Any]:
-    """Resolve a stock name or code using public preview candidates."""
+    """종목명이나 종목코드를 공개 후보군과 주요 종목 매핑에서 찾아 표준 코드로 변환합니다."""
     matches = []
     needle = query.strip().lower()
     live = _quote_public(query, ctx)
@@ -1362,7 +1362,7 @@ def resolve_stock(query: str, market: str = "ALL", limit: int = 5, ctx: Context 
 
 @mcp.tool()
 def stock_snapshot(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
-    """Return a compact public snapshot for a candidate."""
+    """종목의 공개 시세, 등락률, 거래량, 최근 가격 흐름, 점수표를 요약합니다."""
     live = _quote_public(symbol_or_name, ctx)
     if live:
         return _response({
@@ -1380,7 +1380,7 @@ def stock_snapshot(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
 
 @mcp.tool()
 def market_movers(market: str = "ALL", ranking_type: str = "theme_strength", ctx: Context = None) -> dict[str, Any]:
-    """Show hot-stock or theme movement categories without private account data."""
+    """상승률, 하락률, 거래량, 거래대금 기준으로 움직임이 큰 공개 관심 종목을 보여줍니다."""
     live_candidates = _live_candidates(market, MAX_ITEMS, ranking_type, ctx)
     candidates = live_candidates or _read_state().get("candidates", [])
     return _response({
@@ -1394,7 +1394,7 @@ def market_movers(market: str = "ALL", ranking_type: str = "theme_strength", ctx
 
 @mcp.tool()
 def news_signal_summary(symbol_or_theme: str = "market", ctx: Context = None) -> dict[str, Any]:
-    """Summarize public news and external signal themes."""
+    """종목이나 테마의 뉴스, 외부 신호, 반복 재료를 점검할 관점을 요약합니다."""
     candidate = _find_candidate(symbol_or_theme, ctx)
     themes = _theme_tags(str((candidate or {}).get("symbol", symbol_or_theme)), str((candidate or {}).get("name", symbol_or_theme)))
     return _response({
@@ -1409,7 +1409,7 @@ def news_signal_summary(symbol_or_theme: str = "market", ctx: Context = None) ->
 
 @mcp.tool()
 def catalyst_check(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
-    """Check likely public catalysts behind a stock or theme move."""
+    """종목이 움직인 원인으로 볼 수 있는 뉴스, 공시, 수급, 테마, 매크로 재료를 점검합니다."""
     candidate = _find_candidate(symbol_or_name, ctx)
     target = candidate or {"symbol": symbol_or_name, "name": symbol_or_name}
     return _response({
@@ -1430,7 +1430,7 @@ def catalyst_check(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
 
 @mcp.tool()
 def disclosure_financial_summary(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
-    """Summarize disclosure and fundamental context in public-preview form."""
+    """OpenDART 설정 시 기업개황, 주요 재무계정, 최근 공시를 요약하고 설정이 없으면 확인 항목을 제시합니다."""
     company = _dart_company(symbol_or_name, ctx)
     financial = _dart_financial(symbol_or_name, ctx=ctx)
     filings = _dart_filings(symbol_or_name, limit=5, ctx=ctx)
@@ -1454,7 +1454,7 @@ def disclosure_financial_summary(symbol_or_name: str, ctx: Context = None) -> di
 
 @mcp.tool()
 def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int = 5, ctx: Context = None) -> dict[str, Any]:
-    """Return CodexStock watch candidates after public evidence filtering."""
+    """공개 데이터 필터를 거쳐 관심 후보 종목을 발굴하고 요약, 점수, 리스크를 함께 제공합니다."""
     capped_limit = max(1, min(limit, MAX_ITEMS))
     ranking_type = "trading_value" if style.lower() in {"liquidity", "거래대금", "active"} else "change_rate"
     live_candidates = _live_candidates(market, capped_limit, ranking_type, ctx)
@@ -1471,7 +1471,7 @@ def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int
 
 @mcp.tool()
 def candidate_compare(symbols_or_names: str, market: str = "ALL", ctx: Context = None) -> dict[str, Any]:
-    """Compare multiple public watch candidates by evidence, risk, and next checks."""
+    """여러 후보 종목을 근거, 리스크, 모멘텀, 유동성, 테마 점수로 비교합니다."""
     names = [part.strip() for part in re.split(r"[,/|]", symbols_or_names) if part.strip()]
     compared = []
     for name in names[:MAX_ITEMS]:
@@ -1495,7 +1495,7 @@ def candidate_compare(symbols_or_names: str, market: str = "ALL", ctx: Context =
 
 @mcp.tool()
 def explain_candidate(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
-    """Explain one watch candidate's evidence, weakness, and invalidation checks."""
+    """후보 한 종목의 선택 근거, 약점, 무효화 조건, 가격 흐름, 공시 확인 포인트를 설명합니다."""
     candidate = _find_candidate(symbol_or_name, ctx)
     if not candidate:
         return _response({"ok": False, "message": "Candidate not found in public preview data."})
@@ -1512,7 +1512,7 @@ def explain_candidate(symbol_or_name: str, ctx: Context = None) -> dict[str, Any
 
 @mcp.tool()
 def risk_check(symbol_or_name: str, allocation_percent: float = 0.0) -> dict[str, Any]:
-    """Explain public risk checks for a symbol or allocation."""
+    """종목과 비중을 기준으로 집중도, 유동성, 변동성, 이벤트 위험을 공개 기준으로 점검합니다."""
     return _response({
         "ok": True,
         "target": symbol_or_name,
@@ -1525,7 +1525,7 @@ def risk_check(symbol_or_name: str, allocation_percent: float = 0.0) -> dict[str
 
 @mcp.tool()
 def watchlist_plan(symbol_or_name: str = "market", horizon: str = "today") -> dict[str, Any]:
-    """Create a public watchlist plan with keep/drop conditions."""
+    """관심 종목을 계속 볼 조건과 제외할 조건을 정리합니다."""
     return _response({
         "ok": True,
         "target": symbol_or_name,
@@ -1548,13 +1548,13 @@ def watchlist_plan(symbol_or_name: str = "market", horizon: str = "today") -> di
 
 @mcp.tool()
 def ai_staff_opinions(symbol_or_name: str = "market", ctx: Context = None) -> dict[str, Any]:
-    """Show public AI staff viewpoints."""
+    """연구, 수급, 재무, 전략, 매매, 리스크 역할별 AI 관점을 공개용으로 요약합니다."""
     return _response({"ok": True, "target": symbol_or_name, "staff": _read_state().get("staff", [])})
 
 
 @mcp.tool()
 def ai_research_consensus(symbol_or_name: str = "market", allocation_percent: float = 0.0, ctx: Context = None) -> dict[str, Any]:
-    """Show a public CodexStock-style AI research consensus observation."""
+    """여러 AI 관점을 모아 연구용 종합 의견, 리스크, 다음 확인 항목을 제시합니다. 매수·매도 추천이 아닙니다."""
     candidate = _find_candidate(symbol_or_name, ctx) or {
         "symbol": symbol_or_name,
         "name": symbol_or_name,
@@ -1581,7 +1581,7 @@ def ai_research_consensus(symbol_or_name: str = "market", allocation_percent: fl
 
 @mcp.tool()
 def strategy_validation_summary(strategy_name: str = "public-preview", ctx: Context = None) -> dict[str, Any]:
-    """Summarize strategy validation status without private performance claims."""
+    """전략 검증 상태, 필요한 검증 증거, 최근 가격 흐름을 연구 참고용으로 요약합니다."""
     history = _price_history(strategy_name, limit=20, ctx=ctx)
     history_note = "Attached public recent price history for the requested symbol-like strategy name." if history else "No symbol-like price history attached."
     return _response({
@@ -1597,7 +1597,7 @@ def strategy_validation_summary(strategy_name: str = "public-preview", ctx: Cont
 
 @mcp.tool()
 def post_market_review(date: str = "latest") -> dict[str, Any]:
-    """Summarize post-market replay and review questions."""
+    """장마감 후 복기 질문과 놓친 종목, 선택 이유, 다음 개선 포인트를 정리합니다."""
     return _response({
         "ok": True,
         "date": date,
@@ -1613,7 +1613,7 @@ def post_market_review(date: str = "latest") -> dict[str, Any]:
 
 @mcp.tool()
 def learning_summary(period: str = "latest") -> dict[str, Any]:
-    """Summarize public learning-loop output."""
+    """최근 복기와 검증에서 얻은 학습 루프, 개선 후보, 다음 과제를 요약합니다."""
     return _response({
         "ok": True,
         "period": period,
