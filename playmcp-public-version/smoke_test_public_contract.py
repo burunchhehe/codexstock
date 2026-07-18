@@ -41,6 +41,9 @@ def main() -> None:
     assert "ThreadPoolExecutor" in source
     assert "PUBLIC_QUOTE_CACHE" in source
     assert "DART_CACHE_TTL_SECONDS" in source
+    assert "PUBLIC_SCAN_LIMIT" in source
+    assert "_rank_quotes" in source
+    assert "_theme_tags" in source
     assert "inquire-price" in source
     assert "fnlttSinglAcnt" in source
     assert "order-cash" not in source

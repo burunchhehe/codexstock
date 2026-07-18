@@ -17,6 +17,7 @@ from mcp.server.fastmcp.server import TransportSecuritySettings
 
 MAX_ITEMS = 8
 MAX_TEXT = 12000
+PUBLIC_SCAN_LIMIT = max(MAX_ITEMS, min(int(os.environ.get("CODEXSTOCK_PUBLIC_SCAN_LIMIT", "24")), 40))
 PUBLIC_DATA_DIR = os.environ.get("CODEXSTOCK_PUBLIC_DATA_DIR")
 MCP_HOST = os.environ.get("CODEXSTOCK_PUBLIC_MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("CODEXSTOCK_PUBLIC_MCP_PORT", "8000"))
@@ -99,6 +100,27 @@ SYMBOL_ALIASES = {
     "두산에너빌리티": "034020.KS",
     "대한전선": "001440.KS",
     "삼성중공업": "010140.KS",
+    "lg화학": "051910.KS",
+    "posco홀딩스": "005490.KS",
+    "포스코홀딩스": "005490.KS",
+    "포스코퓨처엠": "003670.KS",
+    "삼성sdi": "006400.KS",
+    "lg전자": "066570.KS",
+    "kb금융": "105560.KS",
+    "신한지주": "055550.KS",
+    "하나금융지주": "086790.KS",
+    "카카오뱅크": "323410.KS",
+    "삼성물산": "028260.KS",
+    "현대모비스": "012330.KS",
+    "hd현대중공업": "329180.KS",
+    "hd한국조선해양": "009540.KS",
+    "삼양식품": "003230.KS",
+    "에코프로": "086520.KQ",
+    "에코프로비엠": "247540.KQ",
+    "알테오젠": "196170.KQ",
+    "리노공업": "058470.KQ",
+    "hpsp": "403870.KQ",
+    "실리콘투": "257720.KQ",
     "irobot": "IRBT",
     "아이로봇": "IRBT",
     "apple": "AAPL",
@@ -129,6 +151,26 @@ CODE_NAME_ALIASES = {
     "034020": "두산에너빌리티",
     "001440": "대한전선",
     "010140": "삼성중공업",
+    "051910": "LG화학",
+    "005490": "POSCO홀딩스",
+    "003670": "포스코퓨처엠",
+    "006400": "삼성SDI",
+    "066570": "LG전자",
+    "105560": "KB금융",
+    "055550": "신한지주",
+    "086790": "하나금융지주",
+    "323410": "카카오뱅크",
+    "028260": "삼성물산",
+    "012330": "현대모비스",
+    "329180": "HD현대중공업",
+    "009540": "HD한국조선해양",
+    "003230": "삼양식품",
+    "086520": "에코프로",
+    "247540": "에코프로비엠",
+    "196170": "알테오젠",
+    "058470": "리노공업",
+    "403870": "HPSP",
+    "257720": "실리콘투",
 }
 
 MARKET_INDEX_SYMBOLS = {
@@ -152,6 +194,26 @@ PUBLIC_WATCH_UNIVERSE = [
     "034020.KS",
     "001440.KS",
     "010140.KS",
+    "051910.KS",
+    "005490.KS",
+    "003670.KS",
+    "006400.KS",
+    "066570.KS",
+    "105560.KS",
+    "055550.KS",
+    "086790.KS",
+    "323410.KS",
+    "028260.KS",
+    "012330.KS",
+    "329180.KS",
+    "009540.KS",
+    "003230.KS",
+    "086520.KQ",
+    "247540.KQ",
+    "196170.KQ",
+    "058470.KQ",
+    "403870.KQ",
+    "257720.KQ",
     "AAPL",
     "MSFT",
     "NVDA",
@@ -184,6 +246,26 @@ CORP_CODE_ALIASES = {
     "034020": "00159616",
     "001440": "00148914",
     "010140": "00126446",
+    "051910": "00356361",
+    "005490": "00155319",
+    "003670": "00155276",
+    "006400": "00126256",
+    "066570": "00401731",
+    "105560": "00688996",
+    "055550": "00382199",
+    "086790": "00547583",
+    "323410": "01276540",
+    "028260": "00149655",
+    "012330": "00164788",
+    "329180": "01350869",
+    "009540": "00164645",
+    "003230": "00126901",
+    "086520": "00495861",
+    "247540": "01206873",
+    "196170": "00995845",
+    "058470": "00386916",
+    "403870": "01591438",
+    "257720": "01137236",
 }
 
 DEMO_STATE: dict[str, Any] = {
@@ -581,6 +663,56 @@ def _quote_many(symbols: list[str], limit: int = MAX_ITEMS) -> list[dict[str, An
     return [quotes_by_symbol[symbol] for symbol in unique_symbols if symbol in quotes_by_symbol]
 
 
+def _rank_quotes(quotes: list[dict[str, Any]], ranking_type: str) -> list[dict[str, Any]]:
+    rank = ranking_type.lower()
+    if rank in {"volume", "거래량"}:
+        key = lambda item: item.get("volume") or -1
+    elif rank in {"trading_value", "amount", "거래대금"}:
+        key = lambda item: item.get("trading_value") or ((item.get("price") or 0) * (item.get("volume") or 0))
+    elif rank in {"decliners", "bottom", "fall", "하락률"}:
+        return sorted(quotes, key=lambda item: item.get("change_percent") if item.get("change_percent") is not None else 999)
+    else:
+        key = lambda item: item.get("change_percent") if item.get("change_percent") is not None else -999
+    return sorted(quotes, key=key, reverse=True)
+
+
+def _theme_tags(symbol: str, name: str | None = None) -> list[str]:
+    code = symbol.split(".")[0]
+    tags = {
+        "005930": ["반도체", "대형주", "AI 인프라"],
+        "000660": ["반도체", "HBM", "AI 인프라"],
+        "042660": ["조선", "방산", "수주"],
+        "010140": ["조선", "해양플랜트"],
+        "329180": ["조선", "수주"],
+        "009540": ["조선", "지주"],
+        "034020": ["원전", "에너지", "인프라"],
+        "373220": ["2차전지", "배터리"],
+        "051910": ["화학", "2차전지"],
+        "003670": ["2차전지", "소재"],
+        "006400": ["2차전지", "배터리"],
+        "086520": ["2차전지", "코스닥"],
+        "247540": ["2차전지", "소재", "코스닥"],
+        "207940": ["바이오", "CDMO"],
+        "068270": ["바이오", "헬스케어"],
+        "196170": ["바이오", "플랫폼", "코스닥"],
+        "035420": ["인터넷", "플랫폼", "AI"],
+        "035720": ["인터넷", "플랫폼"],
+        "257720": ["화장품", "수출", "코스닥"],
+        "003230": ["음식료", "수출"],
+    }
+    return tags.get(code, ["공개 관심 유니버스"])
+
+
+def _research_summary(candidate: dict[str, Any]) -> str:
+    change = candidate.get("change_percent")
+    name = candidate.get("name") or candidate.get("symbol")
+    tags = ", ".join(candidate.get("theme_tags") or _theme_tags(str(candidate.get("symbol", "")), str(name)))
+    if isinstance(change, (int, float)):
+        direction = "강세" if change > 0 else "약세" if change < 0 else "보합"
+        return f"{name}: {direction} {change:.2f}%, 주요 점검 테마는 {tags}."
+    return f"{name}: 가격 변화율 확인 필요, 주요 점검 테마는 {tags}."
+
+
 def _live_market_brief(market: str) -> dict[str, Any] | None:
     symbols = MARKET_INDEX_SYMBOLS.get(market.upper(), MARKET_INDEX_SYMBOLS["ALL"])
     quotes = _quote_many(symbols, limit=len(symbols))
@@ -602,14 +734,15 @@ def _live_market_brief(market: str) -> dict[str, Any] | None:
     }
 
 
-def _live_candidates(market: str, limit: int) -> list[dict[str, Any]]:
+def _live_candidates(market: str, limit: int, ranking_type: str = "change_rate") -> list[dict[str, Any]]:
     symbols = PUBLIC_WATCH_UNIVERSE
     if market.upper() in {"KR", "KOREA", "KOSPI", "KOSDAQ"}:
         symbols = [symbol for symbol in symbols if symbol.endswith(".KS") or symbol.endswith(".KQ")]
     elif market.upper() == "US":
         symbols = [symbol for symbol in symbols if "." not in symbol]
-    quotes = _quote_many(symbols, limit=len(symbols))
-    quotes.sort(key=lambda item: (item.get("change_percent") is not None, item.get("change_percent") or -999), reverse=True)
+    scan_limit = min(len(symbols), max(limit, PUBLIC_SCAN_LIMIT))
+    quotes = _quote_many(symbols, limit=scan_limit)
+    quotes = _rank_quotes(quotes, ranking_type)
     candidates = []
     for quote in quotes[: max(1, min(limit, MAX_ITEMS))]:
         candidates.append({
@@ -620,10 +753,13 @@ def _live_candidates(market: str, limit: int) -> list[dict[str, Any]]:
             "currency": quote.get("currency"),
             "change_percent": quote.get("change_percent"),
             "volume": quote.get("volume"),
+            "trading_value": quote.get("trading_value") or ((quote.get("price") or 0) * (quote.get("volume") or 0)),
+            "theme_tags": _theme_tags(str(quote.get("symbol", "")), str(quote.get("name", ""))),
             "reason": "Public watch-universe momentum and price-change scan.",
             "risk": "Needs catalyst, liquidity, and validation checks before any private decision.",
             "source_mode": quote.get("source_mode"),
         })
+        candidates[-1]["summary"] = _research_summary(candidates[-1])
     return candidates
 
 
@@ -771,7 +907,7 @@ def stock_snapshot(symbol_or_name: str) -> dict[str, Any]:
 @mcp.tool()
 def market_movers(market: str = "ALL", ranking_type: str = "theme_strength") -> dict[str, Any]:
     """Show hot-stock or theme movement categories without private account data."""
-    live_candidates = _live_candidates(market, MAX_ITEMS)
+    live_candidates = _live_candidates(market, MAX_ITEMS, ranking_type)
     candidates = live_candidates or _read_state().get("candidates", [])
     return _response({
         "ok": True,
@@ -785,11 +921,15 @@ def market_movers(market: str = "ALL", ranking_type: str = "theme_strength") -> 
 @mcp.tool()
 def news_signal_summary(symbol_or_theme: str = "market") -> dict[str, Any]:
     """Summarize public news and external signal themes."""
+    candidate = _find_candidate(symbol_or_theme)
+    themes = _theme_tags(str((candidate or {}).get("symbol", symbol_or_theme)), str((candidate or {}).get("name", symbol_or_theme)))
     return _response({
         "ok": True,
         "target": symbol_or_theme,
-        "summary": "Combine repeated sources, theme strength, and risk flags before candidate promotion.",
-        "checks": ["source repetition", "recency", "theme relevance", "risk language", "overlap with movers"],
+        "theme_tags": themes,
+        "summary": f"Check whether {symbol_or_theme} is moving with {', '.join(themes)} themes, repeated news, disclosure timing, and market movers overlap.",
+        "checks": ["source repetition", "recency", "theme relevance", "risk language", "overlap with movers", "disclosure timing"],
+        "next_step": "Use catalyst_check and disclosure_financial_summary for source quality before promoting the candidate.",
     })
 
 
@@ -801,6 +941,7 @@ def catalyst_check(symbol_or_name: str) -> dict[str, Any]:
     return _response({
         "ok": True,
         "target": target,
+        "theme_tags": _theme_tags(str(target.get("symbol", symbol_or_name)), str(target.get("name", symbol_or_name))),
         "likely_catalyst_checks": [
             "fresh news or disclosure",
             "sector/theme rotation",
@@ -808,6 +949,7 @@ def catalyst_check(symbol_or_name: str) -> dict[str, Any]:
             "macro-sensitive move",
             "external signal repetition",
         ],
+        "quick_read": _research_summary(target) if isinstance(target, dict) else "Candidate requires public quote confirmation.",
         "research_note": "Treat catalyst results as hypotheses until source quality and timing are verified.",
     })
 
@@ -838,7 +980,8 @@ def disclosure_financial_summary(symbol_or_name: str) -> dict[str, Any]:
 def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int = 5) -> dict[str, Any]:
     """Return CodexStock watch candidates after public evidence filtering."""
     capped_limit = max(1, min(limit, MAX_ITEMS))
-    live_candidates = _live_candidates(market, capped_limit)
+    ranking_type = "trading_value" if style.lower() in {"liquidity", "거래대금", "active"} else "change_rate"
+    live_candidates = _live_candidates(market, capped_limit, ranking_type)
     candidates = live_candidates or _read_state().get("candidates", [])[:capped_limit]
     return _response({
         "ok": True,
@@ -846,6 +989,7 @@ def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int
         "style": style,
         "candidates": candidates,
         "fallback_used": not bool(live_candidates),
+        "how_to_read": "Candidates are research watch ideas ranked by public evidence. They are not buy recommendations.",
     })
 
 

@@ -58,12 +58,15 @@ The public MCP keeps the PlayMCP-friendly 20-tool surface, but uses internal per
 - Multi-symbol scans run with a small bounded thread pool.
 - Failed quote lookups are briefly cached to avoid repeated timeout storms.
 - Responses are capped and redacted before returning to the LLM.
+- The public watch universe includes representative KOSPI/KOSDAQ/US names across semiconductors, AI infrastructure, shipbuilding, energy, battery, bio, platform, finance, cosmetics, and export themes.
+- Mover/candidate scans can rank by change rate, trading value, volume, or decliners without adding extra tools.
 
 Optional tuning:
 
 ```powershell
 $env:CODEXSTOCK_PUBLIC_HTTP_TIMEOUT="4.0"
 $env:CODEXSTOCK_PUBLIC_MAX_WORKERS="4"
+$env:CODEXSTOCK_PUBLIC_SCAN_LIMIT="24"
 ```
 
 Keep `CODEXSTOCK_PUBLIC_MAX_WORKERS` modest for PlayMCP hosting. Higher values may overload public data sources or trigger rate limits.
