@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">CodexStock AI staff workflow demo</title>
+  <desc id="desc">Synthetic public demo showing AI staff roles without private trading data.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071318"/>
+      <stop offset="1" stop-color="#1b182f"/>
+    </linearGradient>
+    <style>
+      .bg{fill:url(#bg)}
+      .card{fill:#101b24;stroke:#2b7284;stroke-width:1.5}
+      .head{fill:#132f38;stroke:#54d7ff;stroke-width:1}
+      .text{font-family:Segoe UI,Arial,sans-serif;fill:#f1fbff}
+      .muted{fill:#93aab2}
+      .cyan{fill:#54d7ff}
+      .green{fill:#4de0a4}
+      .yellow{fill:#f0c95c}
+    </style>
+  </defs>
+  <rect class="bg" width="1280" height="720"/>
+  <text x="58" y="72" class="text cyan" font-size="32" font-weight="800">AI Staff Workflow</text>
+  <text x="58" y="106" class="text muted" font-size="17">Roles create independent evidence before candidates reach the risk gate.</text>
+
+  <g transform="translate(58 150)">
+    <rect width="360" height="190" rx="20" class="card"/>
+    <rect x="20" y="20" width="320" height="44" rx="12" class="head"/>
+    <text x="40" y="49" class="text" font-size="18" font-weight="700">Research AI</text>
+    <text x="40" y="92" class="text muted" font-size="15">Finds hypotheses and checks evidence.</text>
+    <text x="40" y="126" class="text green" font-size="14">Output: research note</text>
+    <text x="40" y="154" class="text yellow" font-size="14">Risk: stale evidence rejected</text>
+  </g>
+
+  <g transform="translate(460 150)">
+    <rect width="360" height="190" rx="20" class="card"/>
+    <rect x="20" y="20" width="320" height="44" rx="12" class="head"/>
+    <text x="40" y="49" class="text" font-size="18" font-weight="700">Supply/Demand Researcher</text>
+    <text x="40" y="92" class="text muted" font-size="15">Checks flow, liquidity, and market pressure.</text>
+    <text x="40" y="126" class="text green" font-size="14">Output: flow context</text>
+    <text x="40" y="154" class="text yellow" font-size="14">Risk: weak liquidity blocked</text>
+  </g>
+
+  <g transform="translate(862 150)">
+    <rect width="360" height="190" rx="20" class="card"/>
+    <rect x="20" y="20" width="320" height="44" rx="12" class="head"/>
+    <text x="40" y="49" class="text" font-size="18" font-weight="700">Strategy Researcher</text>
+    <text x="40" y="92" class="text muted" font-size="15">Tests rules and compares scenarios.</text>
+    <text x="40" y="126" class="text green" font-size="14">Output: validation summary</text>
+    <text x="40" y="154" class="text yellow" font-size="14">Risk: overfit evidence rejected</text>
+  </g>
+
+  <g transform="translate(58 392)">
+    <rect width="360" height="190" rx="20" class="card"/>
+    <rect x="20" y="20" width="320" height="44" rx="12" class="head"/>
+    <text x="40" y="49" class="text" font-size="18" font-weight="700">Trading AI</text>
+    <text x="40" y="92" class="text muted" font-size="15">Builds candidate action plans.</text>
+    <text x="40" y="126" class="text green" font-size="14">Output: intent and exit plan</text>
+    <text x="40" y="154" class="text yellow" font-size="14">Risk: local gate required</text>
+  </g>
+
+  <g transform="translate(460 392)">
+    <rect width="360" height="190" rx="20" class="card"/>
+    <rect x="20" y="20" width="320" height="44" rx="12" class="head"/>
+    <text x="40" y="49" class="text" font-size="18" font-weight="700">Risk Manager</text>
+    <text x="40" y="92" class="text muted" font-size="15">Checks concentration, drawdown, and policy.</text>
+    <text x="40" y="126" class="text green" font-size="14">Output: allow / caution / block</text>
+    <text x="40" y="154" class="text yellow" font-size="14">Risk: overrides weak consensus</text>
+  </g>
+
+  <g transform="translate(862 392)">
+    <rect width="360" height="190" rx="20" class="card"/>
+    <rect x="20" y="20" width="320" height="44" rx="12" class="head"/>
+    <text x="40" y="49" class="text" font-size="18" font-weight="700">Reporting Assistant</text>
+    <text x="40" y="92" class="text muted" font-size="15">Summarizes decisions and learning.</text>
+    <text x="40" y="126" class="text green" font-size="14">Output: concise report</text>
+    <text x="40" y="154" class="text yellow" font-size="14">Risk: private values redacted</text>
+  </g>
+</svg>

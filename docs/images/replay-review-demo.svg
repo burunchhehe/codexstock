@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">CodexStock replay and review demo</title>
+  <desc id="desc">Synthetic public demo showing replay review structure without private trading data.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#061317"/>
+      <stop offset="1" stop-color="#241c12"/>
+    </linearGradient>
+    <style>
+      .bg{fill:url(#bg)}
+      .panel{fill:#101b20;stroke:#2b7789;stroke-width:1.5}
+      .row{fill:#13272d;stroke:#244b55;stroke-width:1}
+      .text{font-family:Segoe UI,Arial,sans-serif;fill:#f2fbff}
+      .muted{fill:#95abb2}
+      .cyan{fill:#54d7ff}
+      .green{fill:#4de0a4}
+      .yellow{fill:#f1c95f}
+      .red{fill:#ff747e}
+    </style>
+  </defs>
+  <rect class="bg" width="1280" height="720"/>
+  <text x="58" y="72" class="text cyan" font-size="32" font-weight="800">Replay, Journal, and Learning Loop</text>
+  <text x="58" y="106" class="text muted" font-size="17">Synthetic structure only: no real trades, no account values, no private journal data.</text>
+
+  <rect x="58" y="148" width="356" height="494" rx="22" class="panel"/>
+  <text x="88" y="190" class="text cyan" font-size="20" font-weight="700">Replay Inputs</text>
+  <g class="text" font-size="15">
+    <rect x="88" y="224" width="292" height="46" rx="12" class="row"/>
+    <text x="108" y="253">Market session snapshot</text>
+    <rect x="88" y="292" width="292" height="46" rx="12" class="row"/>
+    <text x="108" y="321">Candidate list</text>
+    <rect x="88" y="360" width="292" height="46" rx="12" class="row"/>
+    <text x="108" y="389">Chosen trade reasons</text>
+    <rect x="88" y="428" width="292" height="46" rx="12" class="row"/>
+    <text x="108" y="457">Missed-name review</text>
+    <rect x="88" y="496" width="292" height="46" rx="12" class="row"/>
+    <text x="108" y="525">External signal summary</text>
+  </g>
+
+  <rect x="462" y="148" width="356" height="494" rx="22" class="panel"/>
+  <text x="492" y="190" class="text cyan" font-size="20" font-weight="700">Review Questions</text>
+  <text x="492" y="236" class="text" font-size="16">Why was it selected?</text>
+  <text x="492" y="286" class="text" font-size="16">Why was it rejected?</text>
+  <text x="492" y="336" class="text" font-size="16">Was the timing reasonable?</text>
+  <text x="492" y="386" class="text" font-size="16">What did the risk gate miss?</text>
+  <text x="492" y="436" class="text" font-size="16">What should change next time?</text>
+  <rect x="492" y="492" width="276" height="76" rx="16" fill="#0d231c" stroke="#4de0a4"/>
+  <text x="518" y="524" class="text green" font-size="17" font-weight="700">Learning Output</text>
+  <text x="518" y="550" class="text muted" font-size="14">Rules, cautions, and next-session tasks</text>
+
+  <rect x="866" y="148" width="356" height="494" rx="22" class="panel"/>
+  <text x="896" y="190" class="text cyan" font-size="20" font-weight="700">Evidence Trail</text>
+  <path d="M916 262 L966 222 L1016 250 L1072 196 L1154 238" fill="none" stroke="#4de0a4" stroke-width="5" stroke-linecap="round"/>
+  <text x="896" y="310" class="text muted" font-size="15">Hashable replay records</text>
+  <text x="896" y="350" class="text muted" font-size="15">Journal entries</text>
+  <text x="896" y="390" class="text muted" font-size="15">Staff meeting summaries</text>
+  <text x="896" y="430" class="text muted" font-size="15">Next-cycle improvement notes</text>
+  <rect x="896" y="492" width="276" height="76" rx="16" fill="#251f0d" stroke="#f1c95f"/>
+  <text x="922" y="524" class="text yellow" font-size="17" font-weight="700">Public build note</text>
+  <text x="922" y="550" class="text muted" font-size="14">Private trading records excluded</text>
+</svg>

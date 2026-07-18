@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">CodexStock dashboard demo</title>
+  <desc id="desc">Synthetic public demo image showing the CodexStock dashboard structure without private data.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071317"/>
+      <stop offset="1" stop-color="#10242a"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#11272f"/>
+      <stop offset="1" stop-color="#081419"/>
+    </linearGradient>
+    <style>
+      .bg{fill:url(#bg)}
+      .panel{fill:url(#card);stroke:#1f6f83;stroke-width:1.5}
+      .soft{fill:#16323b;stroke:#2a7283;stroke-width:1}
+      .text{font-family:Segoe UI,Arial,sans-serif;fill:#e9fbff}
+      .muted{fill:#8aa6ad}
+      .cyan{fill:#49d9ff}
+      .green{fill:#4de0a4}
+      .yellow{fill:#f2cc60}
+      .red{fill:#ff6b75}
+      .line{stroke:#2b6d7d;stroke-width:2}
+      .bar{fill:#244d57}
+      .bar2{fill:#49d9ff}
+    </style>
+  </defs>
+  <rect class="bg" width="1280" height="720"/>
+  <rect x="24" y="24" width="1232" height="88" rx="20" class="panel"/>
+  <text x="52" y="63" class="text cyan" font-size="18" font-weight="700">CodexStock</text>
+  <text x="52" y="91" class="text" font-size="28" font-weight="800">AI Investment Operations Dashboard</text>
+  <text x="480" y="78" class="text muted" font-size="16">Synthetic public demo · no account data · no live positions</text>
+  <rect x="1032" y="46" width="176" height="42" rx="12" class="soft"/>
+  <text x="1060" y="73" class="text green" font-size="15" font-weight="700">Research/Paper Mode</text>
+
+  <rect x="24" y="136" width="286" height="544" rx="18" class="panel"/>
+  <text x="48" y="172" class="text cyan" font-size="18" font-weight="700">Navigation</text>
+  <g font-size="16" class="text">
+    <rect x="46" y="198" width="238" height="42" rx="12" class="soft"/>
+    <text x="66" y="225">Dashboard</text>
+    <text x="66" y="280" class="muted">Candidates</text>
+    <text x="66" y="334" class="muted">AI Staff</text>
+    <text x="66" y="388" class="muted">Sub-Engines</text>
+    <text x="66" y="442" class="muted">Replay Review</text>
+    <text x="66" y="496" class="muted">Settings / Logs</text>
+  </g>
+
+  <rect x="334" y="136" width="430" height="244" rx="18" class="panel"/>
+  <text x="360" y="172" class="text cyan" font-size="18" font-weight="700">Market Brief</text>
+  <text x="360" y="204" class="text" font-size="28" font-weight="800">Session Focus: Candidate Quality</text>
+  <text x="360" y="236" class="text muted" font-size="15">Market radar, theme checks, and watchlist context.</text>
+  <rect x="360" y="268" width="360" height="16" rx="8" class="bar"/>
+  <rect x="360" y="268" width="246" height="16" rx="8" class="bar2"/>
+  <text x="360" y="316" class="text green" font-size="16">Risk gate: normal</text>
+  <text x="360" y="346" class="text yellow" font-size="16">Heavy research: throttled during market hours</text>
+
+  <rect x="788" y="136" width="468" height="244" rx="18" class="panel"/>
+  <text x="816" y="172" class="text cyan" font-size="18" font-weight="700">Candidate Pipeline</text>
+  <g class="text" font-size="15">
+    <rect x="816" y="196" width="386" height="38" rx="11" class="soft"/>
+    <text x="836" y="221">1. Radar detects candidates</text>
+    <rect x="816" y="246" width="386" height="38" rx="11" class="soft"/>
+    <text x="836" y="271">2. AI staff records reasons</text>
+    <rect x="816" y="296" width="386" height="38" rx="11" class="soft"/>
+    <text x="836" y="321">3. Risk gate accepts or blocks</text>
+  </g>
+
+  <rect x="334" y="404" width="282" height="276" rx="18" class="panel"/>
+  <text x="360" y="438" class="text cyan" font-size="18" font-weight="700">AI Staff</text>
+  <text x="360" y="472" class="text" font-size="16">Research · Risk · Trading</text>
+  <text x="360" y="502" class="text muted" font-size="14">Each role leaves evidence.</text>
+  <circle cx="384" cy="552" r="18" fill="#49d9ff"/>
+  <circle cx="444" cy="552" r="18" fill="#4de0a4"/>
+  <circle cx="504" cy="552" r="18" fill="#f2cc60"/>
+  <text x="360" y="620" class="text muted" font-size="14">Synthetic roles only</text>
+
+  <rect x="640" y="404" width="282" height="276" rx="18" class="panel"/>
+  <text x="666" y="438" class="text cyan" font-size="18" font-weight="700">Sub-Engines</text>
+  <text x="666" y="472" class="text" font-size="16">Research Forge · KIS · Scout</text>
+  <text x="666" y="502" class="text muted" font-size="14">Specialist engines propose evidence.</text>
+  <rect x="666" y="532" width="206" height="14" rx="7" class="bar"/>
+  <rect x="666" y="562" width="170" height="14" rx="7" class="bar"/>
+  <rect x="666" y="592" width="226" height="14" rx="7" class="bar"/>
+
+  <rect x="946" y="404" width="310" height="276" rx="18" class="panel"/>
+  <text x="972" y="438" class="text cyan" font-size="18" font-weight="700">Post-Market Review</text>
+  <text x="972" y="472" class="text" font-size="16">Replay · Journal · Learning</text>
+  <text x="972" y="502" class="text muted" font-size="14">Chosen names, missed names, and next actions.</text>
+  <path d="M982 562 L1040 522 L1098 548 L1160 486" fill="none" stroke="#4de0a4" stroke-width="5" stroke-linecap="round"/>
+</svg>

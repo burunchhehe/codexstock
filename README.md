@@ -45,6 +45,18 @@ The goal is not to claim guaranteed returns. The goal is to make the research, d
 See [docs/FEATURES.md](docs/FEATURES.md) for a fuller feature map.
 See [docs/SUB_ENGINES.md](docs/SUB_ENGINES.md) for the sub-engine strategy.
 
+## Public Demo Screens
+
+These are synthetic structure-only demo images. They do not show real accounts, real positions, real order history, private journals, or personal runtime data.
+
+![CodexStock dashboard demo](docs/images/dashboard-demo.svg)
+
+![CodexStock sub-engine orchestration demo](docs/images/sub-engines-demo.svg)
+
+![CodexStock AI staff workflow demo](docs/images/ai-staff-demo.svg)
+
+![CodexStock replay and review demo](docs/images/replay-review-demo.svg)
+
 ## Architecture
 
 ```mermaid
