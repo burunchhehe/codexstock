@@ -49,6 +49,12 @@ See [docs/SUB_ENGINES.md](docs/SUB_ENGINES.md) for the sub-engine strategy.
 
 These are selected real CodexStock UI captures. They were included because they do not show account numbers, balances, tokens, private journals, live positions, or real order/fill logs.
 
+![CodexStock main dashboard](docs/images/actual-ui-main-dashboard.png)
+
+![CodexStock AI staff status board](docs/images/actual-ui-staff-status.png)
+
+![CodexStock sub-engine operations board](docs/images/actual-ui-engine-board.png)
+
 ![CodexStock module navigation cards](docs/images/actual-ui-module-cards.png)
 
 ![CodexStock dashboard page menu](docs/images/actual-ui-dashboard-menu.png)
