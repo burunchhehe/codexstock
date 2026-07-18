@@ -36,12 +36,14 @@ The goal is not to claim guaranteed returns. The goal is to make the research, d
 | Candidate discovery | Screeners, momentum/liquidity filters, candidate scoring, AI decision context |
 | AI staff workflow | Research, supply/demand, fundamentals, strategy, trading, risk, and reporting roles |
 | Research Forge | Reproducible research engine for walk-forward validation, replay, reports, and evidence bundles |
+| Sub-engine orchestration | Research Forge, external signal scout, KIS gateway, and optional quant/backtest workers |
 | Backtest/replay | Historical training, daily replay, missed-name review, replay evidence, learning traces |
 | Trading operations | Paper/live separation, delegated limits, order intent logs, reconciliation-oriented state machine |
 | GPT/MCP access | Redacted local MCP tools for status, candidates, reports, and learning summaries |
 | Safety | Read-only defaults, explicit live-trading gates, credential exclusion, runtime/source separation |
 
 See [docs/FEATURES.md](docs/FEATURES.md) for a fuller feature map.
+See [docs/SUB_ENGINES.md](docs/SUB_ENGINES.md) for the sub-engine strategy.
 
 ## Architecture
 
