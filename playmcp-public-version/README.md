@@ -53,6 +53,20 @@ KIS integration intentionally uses quotation endpoints only. Trading/account end
 
 For a formal public service, do not ask users to paste API keys into tool parameters. Instead, create an encrypted credential profile and give the user a bearer token. The MCP request can then carry that token through the client/auth layer, and the server uses that user's own read-only KIS/DART keys.
 
+User-facing connection flow:
+
+```text
+1. User opens https://<server-domain>/connect
+2. User enters KIS App Key, KIS App Secret, and/or OpenDART API Key
+3. Server encrypts the keys into a per-user credential profile
+4. Server shows a one-time bearer token
+5. User registers only this value in PlayMCP:
+
+   Authorization: Bearer <user_bearer_token>
+```
+
+The MCP tool schemas intentionally do not include `KIS_APP_KEY`, `KIS_APP_SECRET`, `DART_API_KEY`, or raw credential parameters.
+
 Generate a master key:
 
 ```powershell
@@ -89,6 +103,7 @@ Important boundaries:
 - User KIS/DART keys are encrypted at rest.
 - User access tokens are cached separately per user profile.
 - Tool parameters never include raw API keys.
+- `/connect/status?token=<user_bearer_token>` can confirm whether `user_profile_active` is true without revealing keys.
 - Responses redact token/key/account/order-like fields.
 - The public MCP still exposes no account lookup, balance lookup, fill lookup, or order submission tools.
 

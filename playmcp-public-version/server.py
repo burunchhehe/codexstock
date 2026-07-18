@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import hmac
 import json
 import os
@@ -16,6 +17,8 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse
 
 
 MAX_ITEMS = 8
@@ -35,6 +38,7 @@ DART_API_KEY = os.environ.get("DART_API_KEY") or os.environ.get("OPENDART_API_KE
 USER_CREDENTIAL_MODE = os.environ.get("CODEXSTOCK_PUBLIC_CREDENTIAL_MODE", "server_or_public").lower()
 USER_CREDENTIAL_DIR = Path(os.environ.get("CODEXSTOCK_PUBLIC_CREDENTIAL_DIR", str(Path.cwd() / ".codexstock_credentials")))
 USER_CREDENTIAL_MASTER_KEY = os.environ.get("CODEXSTOCK_CREDENTIAL_MASTER_KEY")
+USER_CONNECT_CODE = os.environ.get("CODEXSTOCK_PUBLIC_CONNECT_CODE", "")
 DNS_REBINDING_PROTECTION = os.environ.get("CODEXSTOCK_PUBLIC_DISABLE_DNS_REBINDING", "0") != "1"
 ALLOWED_HOSTS = [
     host.strip()
@@ -490,6 +494,189 @@ def _load_user_credentials(ctx: Context | None = None) -> dict[str, str]:
         return {str(k): str(v) for k, v in loaded.items() if v}
     except Exception:
         return {}
+
+
+def _profile_path_for_token(token: str) -> Path:
+    return USER_CREDENTIAL_DIR / f"{_token_hash(token)}.json"
+
+
+def _require_master_key() -> tuple[bool, str]:
+    if not USER_CREDENTIAL_MASTER_KEY:
+        return False, "CODEXSTOCK_CREDENTIAL_MASTER_KEY is not configured."
+    try:
+        from cryptography.fernet import Fernet
+
+        Fernet(USER_CREDENTIAL_MASTER_KEY.encode("utf-8"))
+    except Exception as exc:
+        return False, f"Invalid CODEXSTOCK_CREDENTIAL_MASTER_KEY: {exc}"
+    return True, "ok"
+
+
+def _create_user_profile(
+    *,
+    kis_app_key: str,
+    kis_app_secret: str,
+    dart_api_key: str,
+    label: str = "",
+) -> dict[str, str]:
+    from cryptography.fernet import Fernet
+
+    ok, message = _require_master_key()
+    if not ok:
+        raise RuntimeError(message)
+
+    token = secrets.token_urlsafe(32)
+    fernet = Fernet(str(USER_CREDENTIAL_MASTER_KEY).encode("utf-8"))
+    credentials = {
+        "kis_app_key": kis_app_key.strip(),
+        "kis_app_secret": kis_app_secret.strip(),
+        "dart_api_key": dart_api_key.strip(),
+    }
+    encrypted = fernet.encrypt(json.dumps(credentials, ensure_ascii=False).encode("utf-8")).decode("utf-8")
+    USER_CREDENTIAL_DIR.mkdir(parents=True, exist_ok=True)
+    profile_path = _profile_path_for_token(token)
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "token_hash": _token_hash(token),
+                "label": label.strip()[:80],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "encrypted_credentials": encrypted,
+                "note": "Read-only KIS/DART credential profile for CodexStock public MCP.",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {"token": token, "token_hash": _token_hash(token), "profile_path": str(profile_path)}
+
+
+def _connect_page_html(*, message: str = "", token: str = "", status_code: int = 200) -> HTMLResponse:
+    ok, key_message = _require_master_key()
+    escaped_message = html.escape(message)
+    escaped_token = html.escape(token)
+    disabled = "" if ok else "disabled"
+    invite_input = (
+        """
+        <label>Connection code
+          <input name="connect_code" autocomplete="one-time-code" placeholder="Provided by the server operator" />
+        </label>
+        """
+        if USER_CONNECT_CODE
+        else ""
+    )
+    token_block = (
+        f"""
+        <section class="result">
+          <h2>Connection token issued</h2>
+          <p>Copy this token once and put it into PlayMCP authentication as a bearer token.</p>
+          <pre>Authorization: Bearer {escaped_token}</pre>
+          <p class="warn">This token is shown only on this screen. Do not share it publicly.</p>
+        </section>
+        """
+        if token
+        else ""
+    )
+    html_body = f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CodexStock Research 연결</title>
+  <style>
+    body {{ margin:0; font-family:Segoe UI, sans-serif; color:#e9fbff; background:#071115; }}
+    main {{ max-width:780px; margin:40px auto; padding:28px; border:1px solid #1b6675; border-radius:20px; background:#0b1b22; }}
+    h1 {{ margin:0 0 8px; color:#41e6ff; }}
+    p {{ color:#b7c8d0; line-height:1.55; }}
+    form {{ display:grid; gap:14px; margin-top:20px; }}
+    label {{ display:grid; gap:6px; color:#dff8ff; font-weight:600; }}
+    input {{ padding:12px; border-radius:10px; border:1px solid #244b55; background:#071115; color:#f6feff; }}
+    button {{ width:max-content; padding:12px 18px; border:0; border-radius:999px; background:#31d0aa; color:#03201a; font-weight:800; cursor:pointer; }}
+    button:disabled {{ opacity:.45; cursor:not-allowed; }}
+    .notice,.result {{ margin-top:18px; padding:14px; border-radius:14px; background:#102832; border:1px solid #245765; }}
+    .warn {{ color:#ffd479; }}
+    pre {{ white-space:pre-wrap; word-break:break-all; padding:12px; border-radius:12px; background:#02080a; border:1px solid #244b55; }}
+    small {{ color:#8ca4ad; }}
+  </style>
+</head>
+<body>
+<main>
+  <h1>CodexStock Research 연결</h1>
+  <p>사용자의 KIS Open API 앱키, 앱 시크릿, OpenDART 키를 서버에 암호화 저장하고 PlayMCP에는 연결 토큰 하나만 등록하는 페이지입니다.</p>
+  <p class="warn">읽기 전용 조회만 사용합니다. 실전 주문, 계좌, 잔고, 체결, 개인 매매기록은 이 공개 MCP에 없습니다.</p>
+  <div class="notice">서버 키 상태: {html.escape(key_message if not ok else "ready")}</div>
+  {f'<div class="notice">{escaped_message}</div>' if message else ''}
+  {token_block}
+  <form method="post" action="/connect">
+    {invite_input}
+    <label>Profile label
+      <input name="label" maxlength="80" placeholder="예: jinwoo-playmcp" />
+    </label>
+    <label>KIS App Key
+      <input name="kis_app_key" autocomplete="off" placeholder="KIS read-only app key" />
+    </label>
+    <label>KIS App Secret
+      <input name="kis_app_secret" type="password" autocomplete="off" placeholder="KIS read-only app secret" />
+    </label>
+    <label>OpenDART API Key
+      <input name="dart_api_key" autocomplete="off" placeholder="Optional DART API key" />
+    </label>
+    <button type="submit" {disabled}>연결 토큰 발급</button>
+  </form>
+  <p><small>발급 후 PlayMCP 인증 값에는 raw KIS/DART 키가 아니라 <code>Authorization: Bearer &lt;token&gt;</code>만 넣습니다.</small></p>
+</main>
+</body>
+</html>"""
+    return HTMLResponse(html_body, status_code=status_code)
+
+
+@mcp.custom_route("/connect", methods=["GET"], include_in_schema=False)
+async def connect_page(request: Request) -> HTMLResponse:
+    return _connect_page_html()
+
+
+@mcp.custom_route("/connect", methods=["POST"], include_in_schema=False)
+async def connect_submit(request: Request) -> HTMLResponse:
+    body = (await request.body()).decode("utf-8", errors="replace")
+    form = {key: values[-1] for key, values in urllib.parse.parse_qs(body, keep_blank_values=True).items()}
+    if USER_CONNECT_CODE and not hmac.compare_digest(form.get("connect_code", ""), USER_CONNECT_CODE):
+        return _connect_page_html(message="Connection code is invalid.", status_code=403)
+    if not (form.get("kis_app_key") and form.get("kis_app_secret") or form.get("dart_api_key")):
+        return _connect_page_html(message="At least KIS app key/secret or DART API key is required.", status_code=400)
+    try:
+        created = _create_user_profile(
+            kis_app_key=form.get("kis_app_key", ""),
+            kis_app_secret=form.get("kis_app_secret", ""),
+            dart_api_key=form.get("dart_api_key", ""),
+            label=form.get("label", ""),
+        )
+    except Exception as exc:
+        return _connect_page_html(message=f"Could not create credential profile: {exc}", status_code=500)
+    return _connect_page_html(message="Credential profile created.", token=created["token"])
+
+
+@mcp.custom_route("/connect/status", methods=["GET"], include_in_schema=False)
+async def connect_status(request: Request) -> JSONResponse:
+    token = request.query_params.get("token", "")
+    active = bool(token and _profile_path_for_token(token).exists())
+    return JSONResponse(
+        {
+            "ok": True,
+            "credential_mode": USER_CREDENTIAL_MODE,
+            "master_key_configured": bool(USER_CREDENTIAL_MASTER_KEY),
+            "connect_page": "/connect",
+            "user_profile_active": active,
+            "token_hash_prefix": _token_hash(token)[:12] if token else None,
+            "safety": {
+                "raw_api_keys_in_tool_params": False,
+                "order_tools": False,
+                "account_balance_tools": False,
+                "read_only_kis_dart": True,
+            },
+        }
+    )
 
 
 def _credential_context(ctx: Context | None = None) -> dict[str, Any]:

@@ -40,6 +40,9 @@ def main() -> None:
     assert "DART_API_KEY" in source
     assert "CODEXSTOCK_PUBLIC_CREDENTIAL_MODE" in source
     assert "_load_user_credentials" in source
+    assert "_create_user_profile" in source
+    assert '@mcp.custom_route("/connect"' in source
+    assert '@mcp.custom_route("/connect/status"' in source
     assert "USER_KIS_TOKEN_CACHE" in source
     assert "Authorization" not in source or "Bearer" in source
     assert "ThreadPoolExecutor" in source
