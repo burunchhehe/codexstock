@@ -38,16 +38,28 @@ def main() -> None:
     source = SERVER.read_text(encoding="utf-8")
     assert "KIS_APP_KEY" in source
     assert "DART_API_KEY" in source
+    assert "CODEXSTOCK_PUBLIC_CREDENTIAL_MODE" in source
+    assert "_load_user_credentials" in source
+    assert "USER_KIS_TOKEN_CACHE" in source
+    assert "Authorization" not in source or "Bearer" in source
     assert "ThreadPoolExecutor" in source
     assert "PUBLIC_QUOTE_CACHE" in source
     assert "DART_CACHE_TTL_SECONDS" in source
     assert "PUBLIC_SCAN_LIMIT" in source
     assert "_rank_quotes" in source
     assert "_theme_tags" in source
+    assert "_candidate_score" in source
+    assert "_kis_orderbook" in source
+    assert "_kis_history" in source
+    assert "_dart_filings" in source
+    assert "_history_yahoo" in source
     assert "inquire-price" in source
     assert "fnlttSinglAcnt" in source
     assert "order-cash" not in source
     assert "inquire-balance" not in source
+    credential_manager = SERVER.with_name("manage_user_credentials.py").read_text(encoding="utf-8")
+    assert "Fernet" in credential_manager
+    assert "user_bearer_token" in credential_manager
     assert "investment_action" in source
     assert "disabled" in source
     assert "Not investment advice" in source

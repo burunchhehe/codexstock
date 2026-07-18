@@ -9,6 +9,8 @@ __pycache__/
 .env
 .env.local
 .env.*.local
+.codexstock_credentials/
+playmcp-public-version/.codexstock_credentials/
 
 # Public-release safety: keep private runtime state and large generated assets out.
 data/

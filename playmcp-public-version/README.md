@@ -49,6 +49,49 @@ The public version can run without private keys, but it becomes stronger when th
 
 KIS integration intentionally uses quotation endpoints only. Trading/account endpoints are not included in this public server.
 
+## User-Specific Credential Mode
+
+For a formal public service, do not ask users to paste API keys into tool parameters. Instead, create an encrypted credential profile and give the user a bearer token. The MCP request can then carry that token through the client/auth layer, and the server uses that user's own read-only KIS/DART keys.
+
+Generate a master key:
+
+```powershell
+python manage_user_credentials.py new-master-key
+```
+
+Set server environment:
+
+```powershell
+$env:CODEXSTOCK_CREDENTIAL_MASTER_KEY="<generated-fernet-key>"
+$env:CODEXSTOCK_PUBLIC_CREDENTIAL_MODE="user_profiles"
+$env:CODEXSTOCK_PUBLIC_CREDENTIAL_DIR="C:\secure\codexstock-user-credentials"
+```
+
+Create a user profile:
+
+```powershell
+python manage_user_credentials.py add `
+  --dir "C:\secure\codexstock-user-credentials" `
+  --master-key "<generated-fernet-key>" `
+  --kis-app-key "<user-kis-app-key>" `
+  --kis-app-secret "<user-kis-app-secret>" `
+  --dart-api-key "<user-dart-api-key>"
+```
+
+The script prints a `user_bearer_token`. The client/auth layer should send:
+
+```text
+Authorization: Bearer <user_bearer_token>
+```
+
+Important boundaries:
+
+- User KIS/DART keys are encrypted at rest.
+- User access tokens are cached separately per user profile.
+- Tool parameters never include raw API keys.
+- Responses redact token/key/account/order-like fields.
+- The public MCP still exposes no account lookup, balance lookup, fill lookup, or order submission tools.
+
 ## Performance Model
 
 The public MCP keeps the PlayMCP-friendly 20-tool surface, but uses internal performance guards:
@@ -60,6 +103,9 @@ The public MCP keeps the PlayMCP-friendly 20-tool surface, but uses internal per
 - Responses are capped and redacted before returning to the LLM.
 - The public watch universe includes representative KOSPI/KOSDAQ/US names across semiconductors, AI infrastructure, shipbuilding, energy, battery, bio, platform, finance, cosmetics, and export themes.
 - Mover/candidate scans can rank by change rate, trading value, volume, or decliners without adding extra tools.
+- Candidate comparison includes a lightweight public scorecard for momentum, liquidity, theme fit, and risk penalty.
+- `stock_snapshot`, `explain_candidate`, and `strategy_validation_summary` can attach recent public price history.
+- KIS orderbook/history and OpenDART filings/financials are attached when configured, without exposing account or order tools.
 
 Optional tuning:
 
@@ -107,13 +153,13 @@ The public server exposes 20 read-only tools:
 | `sector_theme_brief` | Summarize strong sectors, themes, and evidence categories |
 | `market_movers` | Show mover categories without private data |
 | `resolve_stock` | Resolve a stock name or code in a lightweight way |
-| `stock_snapshot` | Return a redacted quote-style summary |
+| `stock_snapshot` | Return a redacted quote-style summary with recent price context |
 | `news_signal_summary` | Summarize public news/signal themes |
 | `catalyst_check` | Check likely public catalysts behind a stock or theme move |
 | `disclosure_financial_summary` | Summarize disclosure/fundamental context, using OpenDART when configured |
 | `discover_candidates` | Return candidate ideas with reasons |
-| `candidate_compare` | Compare candidates by evidence, risk, and next checks |
-| `explain_candidate` | Explain one candidate's evidence and risks |
+| `candidate_compare` | Compare candidates by evidence, risk, scorecard, and next checks |
+| `explain_candidate` | Explain one candidate's evidence, risks, filings, and recent price context |
 | `risk_check` | Run a public risk explanation |
 | `watchlist_plan` | Create keep/drop watchlist conditions |
 | `ai_staff_opinions` | Show AI staff viewpoints |

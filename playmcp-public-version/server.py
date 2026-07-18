@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import time
 import urllib.parse
 import urllib.request
@@ -11,7 +14,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
 
 
@@ -29,6 +32,9 @@ KIS_APP_KEY = os.environ.get("KIS_APP_KEY") or os.environ.get("KOREAINVESTMENT_A
 KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET") or os.environ.get("KOREAINVESTMENT_APP_SECRET")
 KIS_BASE_URL = os.environ.get("KIS_BASE_URL", "https://openapi.koreainvestment.com:9443").rstrip("/")
 DART_API_KEY = os.environ.get("DART_API_KEY") or os.environ.get("OPENDART_API_KEY")
+USER_CREDENTIAL_MODE = os.environ.get("CODEXSTOCK_PUBLIC_CREDENTIAL_MODE", "server_or_public").lower()
+USER_CREDENTIAL_DIR = Path(os.environ.get("CODEXSTOCK_PUBLIC_CREDENTIAL_DIR", str(Path.cwd() / ".codexstock_credentials")))
+USER_CREDENTIAL_MASTER_KEY = os.environ.get("CODEXSTOCK_CREDENTIAL_MASTER_KEY")
 DNS_REBINDING_PROTECTION = os.environ.get("CODEXSTOCK_PUBLIC_DISABLE_DNS_REBINDING", "0") != "1"
 ALLOWED_HOSTS = [
     host.strip()
@@ -227,6 +233,7 @@ QUOTE_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
 PUBLIC_QUOTE_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
 DART_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
 KIS_TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0}
+USER_KIS_TOKEN_CACHE: dict[str, dict[str, Any]] = {}
 CACHE_TTL_SECONDS = 45
 DART_CACHE_TTL_SECONDS = 60 * 60 * 6
 CACHE_MAX_ENTRIES = 256
@@ -420,12 +427,98 @@ def _http_post_json(url: str, payload: dict[str, Any], headers: dict[str, str] |
         return None
 
 
-def _kis_configured() -> bool:
-    return bool(KIS_APP_KEY and KIS_APP_SECRET)
+def _fernet():
+    if not USER_CREDENTIAL_MASTER_KEY:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+        return Fernet(USER_CREDENTIAL_MASTER_KEY.encode("utf-8"))
+    except Exception:
+        return None
 
 
-def _dart_configured() -> bool:
-    return bool(DART_API_KEY)
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _request_headers(ctx: Context | None) -> dict[str, str]:
+    if ctx is None:
+        return {}
+    try:
+        request = getattr(ctx.request_context, "request", None)
+    except Exception:
+        return {}
+    headers = getattr(request, "headers", None)
+    if headers:
+        try:
+            return {str(k).lower(): str(v) for k, v in dict(headers).items()}
+        except Exception:
+            pass
+    scope = getattr(request, "scope", None)
+    raw_headers = (scope or {}).get("headers") if isinstance(scope, dict) else None
+    parsed = {}
+    for key, value in raw_headers or []:
+        try:
+            parsed[key.decode("latin1").lower()] = value.decode("latin1")
+        except Exception:
+            continue
+    return parsed
+
+
+def _bearer_token(ctx: Context | None) -> str | None:
+    headers = _request_headers(ctx)
+    auth = headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return headers.get("x-codexstock-user-token") or None
+
+
+def _load_user_credentials(ctx: Context | None = None) -> dict[str, str]:
+    token = _bearer_token(ctx)
+    if not token:
+        return {}
+    fernet = _fernet()
+    if not fernet:
+        return {}
+    profile_path = USER_CREDENTIAL_DIR / f"{_token_hash(token)}.json"
+    try:
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        encrypted = payload.get("encrypted_credentials")
+        if not encrypted:
+            return {}
+        loaded = json.loads(fernet.decrypt(encrypted.encode("utf-8")).decode("utf-8"))
+        return {str(k): str(v) for k, v in loaded.items() if v}
+    except Exception:
+        return {}
+
+
+def _credential_context(ctx: Context | None = None) -> dict[str, Any]:
+    user_credentials = _load_user_credentials(ctx)
+    if user_credentials:
+        return {
+            "mode": "user_profile",
+            "profile_token_hash": _token_hash(_bearer_token(ctx) or "")[:12],
+            "kis_app_key": user_credentials.get("kis_app_key") or user_credentials.get("KIS_APP_KEY"),
+            "kis_app_secret": user_credentials.get("kis_app_secret") or user_credentials.get("KIS_APP_SECRET"),
+            "dart_api_key": user_credentials.get("dart_api_key") or user_credentials.get("DART_API_KEY"),
+        }
+    if USER_CREDENTIAL_MODE == "user_profiles":
+        return {"mode": "user_profile_missing", "kis_app_key": None, "kis_app_secret": None, "dart_api_key": None}
+    return {
+        "mode": "server_or_public",
+        "kis_app_key": KIS_APP_KEY,
+        "kis_app_secret": KIS_APP_SECRET,
+        "dart_api_key": DART_API_KEY,
+    }
+
+
+def _kis_configured(ctx: Context | None = None) -> bool:
+    credentials = _credential_context(ctx)
+    return bool(credentials.get("kis_app_key") and credentials.get("kis_app_secret"))
+
+
+def _dart_configured(ctx: Context | None = None) -> bool:
+    return bool(_credential_context(ctx).get("dart_api_key"))
 
 
 def _stock_code(symbol_or_name: str) -> str | None:
@@ -434,41 +527,55 @@ def _stock_code(symbol_or_name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _kis_access_token() -> str | None:
-    if not _kis_configured():
+def _kis_access_token(ctx: Context | None = None) -> str | None:
+    credentials = _credential_context(ctx)
+    app_key = credentials.get("kis_app_key")
+    app_secret = credentials.get("kis_app_secret")
+    if not (app_key and app_secret):
         return None
     now = time.time()
-    if KIS_TOKEN_CACHE.get("token") and float(KIS_TOKEN_CACHE.get("expires_at") or 0) > now + 60:
+    if credentials.get("mode") == "user_profile":
+        profile_hash = str(credentials.get("profile_token_hash"))
+        cached = USER_KIS_TOKEN_CACHE.get(profile_hash, {})
+        if cached.get("token") and float(cached.get("expires_at") or 0) > now + 60:
+            return str(cached["token"])
+    elif KIS_TOKEN_CACHE.get("token") and float(KIS_TOKEN_CACHE.get("expires_at") or 0) > now + 60:
         return str(KIS_TOKEN_CACHE["token"])
     data = _http_post_json(
         f"{KIS_BASE_URL}/oauth2/tokenP",
-        {"grant_type": "client_credentials", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET},
+        {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
     )
     token = (data or {}).get("access_token")
     expires_in = float((data or {}).get("expires_in") or 3600)
     if not token:
         return None
-    KIS_TOKEN_CACHE["token"] = token
-    KIS_TOKEN_CACHE["expires_at"] = now + min(expires_in, 60 * 60 * 6)
+    cache_item = {"token": token, "expires_at": now + min(expires_in, 60 * 60 * 6)}
+    if credentials.get("mode") == "user_profile":
+        USER_KIS_TOKEN_CACHE[str(credentials.get("profile_token_hash"))] = cache_item
+    else:
+        KIS_TOKEN_CACHE.update(cache_item)
     return str(token)
 
 
-def _kis_headers(tr_id: str) -> dict[str, str] | None:
-    token = _kis_access_token()
-    if not token or not KIS_APP_KEY or not KIS_APP_SECRET:
+def _kis_headers(tr_id: str, ctx: Context | None = None) -> dict[str, str] | None:
+    credentials = _credential_context(ctx)
+    app_key = credentials.get("kis_app_key")
+    app_secret = credentials.get("kis_app_secret")
+    token = _kis_access_token(ctx)
+    if not token or not app_key or not app_secret:
         return None
     return {
         "Content-Type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
-        "appkey": KIS_APP_KEY,
-        "appsecret": KIS_APP_SECRET,
+        "appkey": app_key,
+        "appsecret": app_secret,
         "tr_id": tr_id,
         "custtype": "P",
     }
 
 
-def _kis_get(path: str, params: dict[str, str], tr_id: str) -> dict[str, Any] | None:
-    headers = _kis_headers(tr_id)
+def _kis_get(path: str, params: dict[str, str], tr_id: str, ctx: Context | None = None) -> dict[str, Any] | None:
+    headers = _kis_headers(tr_id, ctx)
     if not headers:
         return None
     query = urllib.parse.urlencode(params)
@@ -483,14 +590,15 @@ def _kis_get(path: str, params: dict[str, str], tr_id: str) -> dict[str, Any] | 
         return None
 
 
-def _kis_quote(symbol_or_name: str) -> dict[str, Any] | None:
+def _kis_quote(symbol_or_name: str, ctx: Context | None = None) -> dict[str, Any] | None:
     code = _stock_code(symbol_or_name)
-    if not code or not _kis_configured():
+    if not code or not _kis_configured(ctx):
         return None
     data = _kis_get(
         "/uapi/domestic-stock/v1/quotations/inquire-price",
         {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code},
         "FHKST01010100",
+        ctx,
     )
     output = (data or {}).get("output") or {}
     if not output:
@@ -523,11 +631,84 @@ def _kis_quote(symbol_or_name: str) -> dict[str, Any] | None:
     }
 
 
-def _dart_get(path: str, params: dict[str, str]) -> dict[str, Any] | None:
-    if not _dart_configured() or not DART_API_KEY:
+def _kis_orderbook(symbol_or_name: str, depth: int = 5, ctx: Context | None = None) -> dict[str, Any] | None:
+    code = _stock_code(symbol_or_name)
+    if not code or not _kis_configured(ctx):
         return None
-    query = urllib.parse.urlencode({"crtfc_key": DART_API_KEY, **params})
-    cache_key = f"{path}?{query}"
+    data = _kis_get(
+        "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+        {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code},
+        "FHKST01010200",
+        ctx,
+    )
+    output = (data or {}).get("output1") or (data or {}).get("output") or {}
+    if not output:
+        return None
+    asks = []
+    bids = []
+    for i in range(1, max(1, min(depth, 10)) + 1):
+        asks.append({"price": output.get(f"askp{i}"), "volume": output.get(f"askp_rsqn{i}")})
+        bids.append({"price": output.get(f"bidp{i}"), "volume": output.get(f"bidp_rsqn{i}")})
+    return {
+        "symbol": f"{code}.KS",
+        "asks": asks,
+        "bids": bids,
+        "expected_price": output.get("antc_cnpr"),
+        "expected_volume": output.get("antc_cntg_vrss"),
+        "source": "KIS Open API domestic-stock orderbook",
+        "source_mode": "kis_read_only",
+    }
+
+
+def _kis_history(symbol_or_name: str, limit: int = 20, ctx: Context | None = None) -> list[dict[str, Any]]:
+    code = _stock_code(symbol_or_name)
+    if not code or not _kis_configured(ctx):
+        return []
+    today = datetime.now().strftime("%Y%m%d")
+    data = _kis_get(
+        "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": code,
+            "FID_INPUT_DATE_1": "20000101",
+            "FID_INPUT_DATE_2": today,
+            "FID_PERIOD_DIV_CODE": "D",
+            "FID_ORG_ADJ_PRC": "1",
+        },
+        "FHKST03010100",
+        ctx,
+    )
+    rows = (data or {}).get("output2") or []
+    history = []
+    for row in rows[: max(1, min(limit, 100))]:
+        history.append({
+            "date": row.get("stck_bsop_date"),
+            "open": row.get("stck_oprc"),
+            "high": row.get("stck_hgpr"),
+            "low": row.get("stck_lwpr"),
+            "close": row.get("stck_clpr"),
+            "volume": row.get("acml_vol"),
+            "trading_value": row.get("acml_tr_pbmn"),
+        })
+    return history
+
+
+def _kis_market_ranking(market: str = "ALL", ranking_type: str = "change_rate", limit: int = MAX_ITEMS, ctx: Context | None = None) -> list[dict[str, Any]]:
+    if not _kis_configured(ctx):
+        return []
+    # KIS ranking TR variants differ by ranking type. Keep this conservative: use public watch scan unless a curated
+    # deployment maps its preferred KIS ranking endpoints into redacted snapshots.
+    return []
+
+
+def _dart_get(path: str, params: dict[str, str], ctx: Context | None = None) -> dict[str, Any] | None:
+    credentials = _credential_context(ctx)
+    dart_api_key = credentials.get("dart_api_key")
+    if not dart_api_key:
+        return None
+    query = urllib.parse.urlencode({"crtfc_key": dart_api_key, **params})
+    source = str(credentials.get("profile_token_hash") or "server")
+    cache_key = f"{source}:{path}?{query}"
     cached = _cache_get(DART_CACHE, cache_key, DART_CACHE_TTL_SECONDS)
     if cached is not None:
         return cached
@@ -539,17 +720,17 @@ def _dart_corp_code(symbol_or_name: str) -> str | None:
     return CORP_CODE_ALIASES.get(code or "")
 
 
-def _dart_company(symbol_or_name: str) -> dict[str, Any] | None:
+def _dart_company(symbol_or_name: str, ctx: Context | None = None) -> dict[str, Any] | None:
     corp_code = _dart_corp_code(symbol_or_name)
     if not corp_code:
         return None
-    data = _dart_get("company.json", {"corp_code": corp_code})
+    data = _dart_get("company.json", {"corp_code": corp_code}, ctx)
     if not data or data.get("status") not in {None, "000"}:
         return None
     return data
 
 
-def _dart_financial(symbol_or_name: str, year: str | None = None, report_code: str = "11011") -> dict[str, Any] | None:
+def _dart_financial(symbol_or_name: str, year: str | None = None, report_code: str = "11011", ctx: Context | None = None) -> dict[str, Any] | None:
     corp_code = _dart_corp_code(symbol_or_name)
     if not corp_code:
         return None
@@ -558,7 +739,7 @@ def _dart_financial(symbol_or_name: str, year: str | None = None, report_code: s
         "corp_code": corp_code,
         "bsns_year": target_year,
         "reprt_code": report_code,
-    })
+    }, ctx)
     if not data or data.get("status") not in {None, "000"}:
         return None
     rows = []
@@ -578,6 +759,31 @@ def _dart_financial(symbol_or_name: str, year: str | None = None, report_code: s
         "source": "OpenDART fnlttSinglAcnt",
         "source_mode": "dart_read_only",
     }
+
+
+def _dart_filings(symbol_or_name: str, limit: int = 5, ctx: Context | None = None) -> list[dict[str, Any]]:
+    corp_code = _dart_corp_code(symbol_or_name)
+    if not corp_code:
+        return []
+    end = datetime.now().strftime("%Y%m%d")
+    start = f"{datetime.now().year}0101"
+    data = _dart_get("list.json", {
+        "corp_code": corp_code,
+        "bgn_de": start,
+        "end_de": end,
+        "page_no": "1",
+        "page_count": str(max(1, min(limit, 100))),
+    }, ctx)
+    rows = []
+    for row in (data or {}).get("list", [])[: max(1, min(limit, MAX_ITEMS))]:
+        rows.append({
+            "date": row.get("rcept_dt"),
+            "report": row.get("report_nm"),
+            "receipt_no": row.get("rcept_no"),
+            "submitter": row.get("flr_nm"),
+            "source": "OpenDART list",
+        })
+    return rows
 
 
 def _resolve_public_symbol(symbol_or_name: str) -> str:
@@ -636,22 +842,56 @@ def _quote_yahoo(symbol_or_name: str) -> dict[str, Any] | None:
     return _cache_set(QUOTE_CACHE, symbol, payload)
 
 
-def _quote_public(symbol_or_name: str) -> dict[str, Any] | None:
+def _history_yahoo(symbol_or_name: str, limit: int = 20) -> list[dict[str, Any]]:
+    if not USE_LIVE_PUBLIC_DATA:
+        return []
     symbol = _resolve_public_symbol(symbol_or_name)
-    source_key = "kis" if _kis_configured() and _stock_code(symbol_or_name) else "public"
+    encoded = urllib.parse.quote(symbol)
+    data = _http_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?range=3mo&interval=1d")
+    result = (data or {}).get("chart", {}).get("result") or []
+    if not result:
+        return []
+    item = result[0]
+    timestamps = item.get("timestamp") or []
+    quote = ((item.get("indicators") or {}).get("quote") or [{}])[0]
+    rows = []
+    for idx, ts in enumerate(timestamps[-max(1, min(limit, 60)):]):
+        def pick(key: str) -> Any:
+            values = quote.get(key) or []
+            return values[idx + max(0, len(timestamps) - max(1, min(limit, 60)))] if idx + max(0, len(timestamps) - max(1, min(limit, 60))) < len(values) else None
+        rows.append({
+            "date": datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat(),
+            "open": pick("open"),
+            "high": pick("high"),
+            "low": pick("low"),
+            "close": pick("close"),
+            "volume": pick("volume"),
+            "source": "Yahoo Finance public chart endpoint",
+        })
+    return rows
+
+
+def _price_history(symbol_or_name: str, limit: int = 20, ctx: Context | None = None) -> list[dict[str, Any]]:
+    return _kis_history(symbol_or_name, limit, ctx) or _history_yahoo(symbol_or_name, limit)
+
+
+def _quote_public(symbol_or_name: str, ctx: Context | None = None) -> dict[str, Any] | None:
+    symbol = _resolve_public_symbol(symbol_or_name)
+    credentials = _credential_context(ctx)
+    source_key = f"kis:{credentials.get('profile_token_hash') or 'server'}" if _kis_configured(ctx) and _stock_code(symbol_or_name) else "public"
     cache_key = f"{source_key}:{symbol}"
     cached_at, cached = PUBLIC_QUOTE_CACHE.get(cache_key, (0.0, None))
     if time.time() - cached_at < CACHE_TTL_SECONDS:
         return cached
-    return _cache_set(PUBLIC_QUOTE_CACHE, cache_key, _kis_quote(symbol_or_name) or _quote_yahoo(symbol_or_name))
+    return _cache_set(PUBLIC_QUOTE_CACHE, cache_key, _kis_quote(symbol_or_name, ctx) or _quote_yahoo(symbol_or_name))
 
 
-def _quote_many(symbols: list[str], limit: int = MAX_ITEMS) -> list[dict[str, Any]]:
+def _quote_many(symbols: list[str], limit: int = MAX_ITEMS, ctx: Context | None = None) -> list[dict[str, Any]]:
     capped = max(1, min(limit, len(symbols)))
     unique_symbols = list(dict.fromkeys(symbols))[:capped]
     quotes_by_symbol: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=min(PUBLIC_MAX_WORKERS, len(unique_symbols))) as executor:
-        futures = {executor.submit(_quote_public, symbol): symbol for symbol in unique_symbols}
+        futures = {executor.submit(_quote_public, symbol, ctx): symbol for symbol in unique_symbols}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
@@ -713,9 +953,48 @@ def _research_summary(candidate: dict[str, Any]) -> str:
     return f"{name}: 가격 변화율 확인 필요, 주요 점검 테마는 {tags}."
 
 
-def _live_market_brief(market: str) -> dict[str, Any] | None:
+def _candidate_score(candidate: dict[str, Any]) -> dict[str, Any]:
+    change = candidate.get("change_percent")
+    volume = candidate.get("volume") or 0
+    trading_value = candidate.get("trading_value") or ((candidate.get("price") or 0) * volume)
+    momentum = 50 + max(-25, min(25, float(change or 0) * 3))
+    liquidity = 50
+    try:
+        if trading_value >= 1_000_000_000_000:
+            liquidity = 90
+        elif trading_value >= 300_000_000_000:
+            liquidity = 78
+        elif trading_value >= 100_000_000_000:
+            liquidity = 66
+        elif trading_value >= 30_000_000_000:
+            liquidity = 55
+    except Exception:
+        liquidity = 50
+    theme = 70 if candidate.get("theme_tags") else 50
+    risk_penalty = 15 if abs(float(change or 0)) > 12 else 0
+    score = round(max(0, min(100, momentum * 0.4 + liquidity * 0.35 + theme * 0.25 - risk_penalty)), 1)
+    return {
+        "score": score,
+        "momentum": round(momentum, 1),
+        "liquidity": liquidity,
+        "theme": theme,
+        "risk_penalty": risk_penalty,
+        "interpretation": "research_watch_candidate" if score >= 60 else "needs_more_evidence",
+    }
+
+
+def _augment_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(candidate)
+    enriched.setdefault("trading_value", (enriched.get("price") or 0) * (enriched.get("volume") or 0))
+    enriched.setdefault("theme_tags", _theme_tags(str(enriched.get("symbol", "")), str(enriched.get("name", ""))))
+    enriched["scorecard"] = _candidate_score(enriched)
+    enriched["summary"] = _research_summary(enriched)
+    return enriched
+
+
+def _live_market_brief(market: str, ctx: Context | None = None) -> dict[str, Any] | None:
     symbols = MARKET_INDEX_SYMBOLS.get(market.upper(), MARKET_INDEX_SYMBOLS["ALL"])
-    quotes = _quote_many(symbols, limit=len(symbols))
+    quotes = _quote_many(symbols, limit=len(symbols), ctx=ctx)
     if not quotes:
         return None
     positives = [quote for quote in quotes if (quote.get("change_percent") or 0) > 0]
@@ -734,18 +1013,19 @@ def _live_market_brief(market: str) -> dict[str, Any] | None:
     }
 
 
-def _live_candidates(market: str, limit: int, ranking_type: str = "change_rate") -> list[dict[str, Any]]:
+def _live_candidates(market: str, limit: int, ranking_type: str = "change_rate", ctx: Context | None = None) -> list[dict[str, Any]]:
     symbols = PUBLIC_WATCH_UNIVERSE
     if market.upper() in {"KR", "KOREA", "KOSPI", "KOSDAQ"}:
         symbols = [symbol for symbol in symbols if symbol.endswith(".KS") or symbol.endswith(".KQ")]
     elif market.upper() == "US":
         symbols = [symbol for symbol in symbols if "." not in symbol]
     scan_limit = min(len(symbols), max(limit, PUBLIC_SCAN_LIMIT))
-    quotes = _quote_many(symbols, limit=scan_limit)
+    ranking = _kis_market_ranking(market, ranking_type, limit=scan_limit, ctx=ctx)
+    quotes = ranking or _quote_many(symbols, limit=scan_limit, ctx=ctx)
     quotes = _rank_quotes(quotes, ranking_type)
     candidates = []
     for quote in quotes[: max(1, min(limit, MAX_ITEMS))]:
-        candidates.append({
+        candidates.append(_augment_candidate({
             "symbol": quote.get("symbol"),
             "name": quote.get("name"),
             "market": "KR" if str(quote.get("symbol", "")).endswith((".KS", ".KQ")) else "US",
@@ -758,16 +1038,15 @@ def _live_candidates(market: str, limit: int, ranking_type: str = "change_rate")
             "reason": "Public watch-universe momentum and price-change scan.",
             "risk": "Needs catalyst, liquidity, and validation checks before any private decision.",
             "source_mode": quote.get("source_mode"),
-        })
-        candidates[-1]["summary"] = _research_summary(candidates[-1])
+        }))
     return candidates
 
 
-def _find_candidate(symbol_or_name: str) -> dict[str, Any] | None:
+def _find_candidate(symbol_or_name: str, ctx: Context | None = None) -> dict[str, Any] | None:
     needle = symbol_or_name.strip().lower()
-    live = _quote_public(symbol_or_name)
+    live = _quote_public(symbol_or_name, ctx)
     if live:
-        return {
+        return _augment_candidate({
             "symbol": live.get("symbol"),
             "name": live.get("name"),
             "market": "KR" if str(live.get("symbol", "")).endswith((".KS", ".KQ")) else "US",
@@ -775,9 +1054,11 @@ def _find_candidate(symbol_or_name: str) -> dict[str, Any] | None:
             "currency": live.get("currency"),
             "change_percent": live.get("change_percent"),
             "volume": live.get("volume"),
+            "trading_value": live.get("trading_value") or ((live.get("price") or 0) * (live.get("volume") or 0)),
+            "theme_tags": _theme_tags(str(live.get("symbol", "")), str(live.get("name", ""))),
             "reason": "Public quote snapshot matched this query.",
             "risk": "Live/public data can be delayed or incomplete. Use as research input only.",
-        }
+        })
     for candidate in _read_state().get("candidates", []):
         haystack = f"{candidate.get('symbol', '')} {candidate.get('name', '')}".lower()
         if needle and needle in haystack:
@@ -794,11 +1075,12 @@ def _risk_level(allocation_percent: float) -> str:
 
 
 @mcp.tool()
-def system_health() -> dict[str, Any]:
+def system_health(ctx: Context = None) -> dict[str, Any]:
     """Return public server health and safety boundaries."""
     state = _read_state()
     sub_engines = state.get("sub_engines", [])
     active_engines = [engine for engine in sub_engines if engine.get("status") in {"ready", "optional"}]
+    credentials = _credential_context(ctx)
     return _response({
         "ok": True,
         "server": "CodexStock Research Public MCP",
@@ -807,12 +1089,15 @@ def system_health() -> dict[str, Any]:
         "last_data_update": state.get("as_of", "unknown"),
         "tool_count": len(PUBLIC_TOOLS),
         "private_runtime_connected": bool(PUBLIC_DATA_DIR),
-        "kis_read_only_configured": _kis_configured(),
-        "dart_read_only_configured": _dart_configured(),
+        "credential_mode": USER_CREDENTIAL_MODE,
+        "active_credential_source": credentials.get("mode"),
+        "user_profile_active": credentials.get("mode") == "user_profile",
+        "kis_read_only_configured": _kis_configured(ctx),
+        "dart_read_only_configured": _dart_configured(ctx),
         "enabled_public_sources": [
             source for source, enabled in {
-                "KIS Open API read-only quote": _kis_configured(),
-                "OpenDART read-only disclosure/financial": _dart_configured(),
+                "KIS Open API read-only quote": _kis_configured(ctx),
+                "OpenDART read-only disclosure/financial": _dart_configured(ctx),
                 "Yahoo Finance public fallback": USE_LIVE_PUBLIC_DATA,
                 "redacted CodexStock snapshots": bool(PUBLIC_DATA_DIR),
             }.items() if enabled
@@ -830,10 +1115,10 @@ def system_health() -> dict[str, Any]:
 
 
 @mcp.tool()
-def market_brief(market: str = "ALL") -> dict[str, Any]:
+def market_brief(market: str = "ALL", ctx: Context = None) -> dict[str, Any]:
     """Summarize the broad market regime, tone, themes, and key risks."""
     state = _read_state()
-    live_brief = _live_market_brief(market)
+    live_brief = _live_market_brief(market, ctx)
     return _response({
         "ok": True,
         "market": market,
@@ -868,11 +1153,11 @@ def sector_theme_brief(market: str = "ALL", limit: int = 5) -> dict[str, Any]:
 
 
 @mcp.tool()
-def resolve_stock(query: str, market: str = "ALL", limit: int = 5) -> dict[str, Any]:
+def resolve_stock(query: str, market: str = "ALL", limit: int = 5, ctx: Context = None) -> dict[str, Any]:
     """Resolve a stock name or code using public preview candidates."""
     matches = []
     needle = query.strip().lower()
-    live = _quote_public(query)
+    live = _quote_public(query, ctx)
     if live and (market == "ALL" or market.upper() in {"KR", "KOREA", "US"}):
         matches.append({
             "symbol": live.get("symbol"),
@@ -889,13 +1174,15 @@ def resolve_stock(query: str, market: str = "ALL", limit: int = 5) -> dict[str, 
 
 
 @mcp.tool()
-def stock_snapshot(symbol_or_name: str) -> dict[str, Any]:
+def stock_snapshot(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
     """Return a compact public snapshot for a candidate."""
-    live = _quote_public(symbol_or_name)
+    live = _quote_public(symbol_or_name, ctx)
     if live:
         return _response({
             "ok": True,
-            "snapshot": live,
+            "snapshot": _augment_candidate(live),
+            "orderbook": _kis_orderbook(symbol_or_name, depth=5, ctx=ctx),
+            "recent_price_history": _price_history(symbol_or_name, limit=10, ctx=ctx),
             "note": "Public market-data snapshot. It may be delayed or incomplete and is not investment advice.",
         })
     candidate = _find_candidate(symbol_or_name)
@@ -905,9 +1192,9 @@ def stock_snapshot(symbol_or_name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def market_movers(market: str = "ALL", ranking_type: str = "theme_strength") -> dict[str, Any]:
+def market_movers(market: str = "ALL", ranking_type: str = "theme_strength", ctx: Context = None) -> dict[str, Any]:
     """Show hot-stock or theme movement categories without private account data."""
-    live_candidates = _live_candidates(market, MAX_ITEMS, ranking_type)
+    live_candidates = _live_candidates(market, MAX_ITEMS, ranking_type, ctx)
     candidates = live_candidates or _read_state().get("candidates", [])
     return _response({
         "ok": True,
@@ -919,9 +1206,9 @@ def market_movers(market: str = "ALL", ranking_type: str = "theme_strength") -> 
 
 
 @mcp.tool()
-def news_signal_summary(symbol_or_theme: str = "market") -> dict[str, Any]:
+def news_signal_summary(symbol_or_theme: str = "market", ctx: Context = None) -> dict[str, Any]:
     """Summarize public news and external signal themes."""
-    candidate = _find_candidate(symbol_or_theme)
+    candidate = _find_candidate(symbol_or_theme, ctx)
     themes = _theme_tags(str((candidate or {}).get("symbol", symbol_or_theme)), str((candidate or {}).get("name", symbol_or_theme)))
     return _response({
         "ok": True,
@@ -934,9 +1221,9 @@ def news_signal_summary(symbol_or_theme: str = "market") -> dict[str, Any]:
 
 
 @mcp.tool()
-def catalyst_check(symbol_or_name: str) -> dict[str, Any]:
+def catalyst_check(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
     """Check likely public catalysts behind a stock or theme move."""
-    candidate = _find_candidate(symbol_or_name)
+    candidate = _find_candidate(symbol_or_name, ctx)
     target = candidate or {"symbol": symbol_or_name, "name": symbol_or_name}
     return _response({
         "ok": True,
@@ -955,16 +1242,18 @@ def catalyst_check(symbol_or_name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def disclosure_financial_summary(symbol_or_name: str) -> dict[str, Any]:
+def disclosure_financial_summary(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
     """Summarize disclosure and fundamental context in public-preview form."""
-    company = _dart_company(symbol_or_name)
-    financial = _dart_financial(symbol_or_name)
-    if company or financial:
+    company = _dart_company(symbol_or_name, ctx)
+    financial = _dart_financial(symbol_or_name, ctx=ctx)
+    filings = _dart_filings(symbol_or_name, limit=5, ctx=ctx)
+    if company or financial or filings:
         return _response({
             "ok": True,
             "target": symbol_or_name,
             "company": company,
             "financial": financial,
+            "recent_filings": filings,
             "summary": "OpenDART read-only company and major-account data are attached when configured.",
             "checks": ["recent filings", "revenue trend", "profitability", "debt/liquidity", "one-off events"],
         })
@@ -977,11 +1266,11 @@ def disclosure_financial_summary(symbol_or_name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int = 5) -> dict[str, Any]:
+def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int = 5, ctx: Context = None) -> dict[str, Any]:
     """Return CodexStock watch candidates after public evidence filtering."""
     capped_limit = max(1, min(limit, MAX_ITEMS))
     ranking_type = "trading_value" if style.lower() in {"liquidity", "거래대금", "active"} else "change_rate"
-    live_candidates = _live_candidates(market, capped_limit, ranking_type)
+    live_candidates = _live_candidates(market, capped_limit, ranking_type, ctx)
     candidates = live_candidates or _read_state().get("candidates", [])[:capped_limit]
     return _response({
         "ok": True,
@@ -994,34 +1283,41 @@ def discover_candidates(market: str = "ALL", style: str = "balanced", limit: int
 
 
 @mcp.tool()
-def candidate_compare(symbols_or_names: str, market: str = "ALL") -> dict[str, Any]:
+def candidate_compare(symbols_or_names: str, market: str = "ALL", ctx: Context = None) -> dict[str, Any]:
     """Compare multiple public watch candidates by evidence, risk, and next checks."""
     names = [part.strip() for part in re.split(r"[,/|]", symbols_or_names) if part.strip()]
     compared = []
     for name in names[:MAX_ITEMS]:
-        candidate = _find_candidate(name) or {"symbol": name, "name": name, "reason": "No public candidate match.", "risk": "Needs evidence."}
+        candidate = _find_candidate(name, ctx) or {"symbol": name, "name": name, "reason": "No public candidate match.", "risk": "Needs evidence."}
+        candidate = _augment_candidate(candidate)
         compared.append({
             "candidate": candidate,
+            "scorecard": candidate.get("scorecard"),
             "strength_checks": ["theme fit", "liquidity", "catalyst clarity", "risk level"],
             "research_status": "watch_only_no_trade_recommendation",
         })
+    compared.sort(key=lambda item: (item.get("scorecard") or {}).get("score", -1), reverse=True)
     return _response({
         "ok": True,
         "market": market,
         "compared": compared,
+        "leader": compared[0]["candidate"] if compared else None,
         "how_to_use": "Use comparison to decide what deserves deeper private research, not to issue a trade.",
     })
 
 
 @mcp.tool()
-def explain_candidate(symbol_or_name: str) -> dict[str, Any]:
+def explain_candidate(symbol_or_name: str, ctx: Context = None) -> dict[str, Any]:
     """Explain one watch candidate's evidence, weakness, and invalidation checks."""
-    candidate = _find_candidate(symbol_or_name)
+    candidate = _find_candidate(symbol_or_name, ctx)
     if not candidate:
         return _response({"ok": False, "message": "Candidate not found in public preview data."})
     return _response({
         "ok": True,
         "candidate": candidate,
+        "scorecard": candidate.get("scorecard"),
+        "recent_price_history": _price_history(symbol_or_name, limit=10, ctx=ctx),
+        "recent_filings": _dart_filings(symbol_or_name, limit=3, ctx=ctx),
         "evidence": ["market strength", "liquidity", "news/theme signal", "risk review"],
         "invalidation": ["weak volume", "theme fading", "risk concentration", "failed replay validation"],
     })
@@ -1064,15 +1360,15 @@ def watchlist_plan(symbol_or_name: str = "market", horizon: str = "today") -> di
 
 
 @mcp.tool()
-def ai_staff_opinions(symbol_or_name: str = "market") -> dict[str, Any]:
+def ai_staff_opinions(symbol_or_name: str = "market", ctx: Context = None) -> dict[str, Any]:
     """Show public AI staff viewpoints."""
     return _response({"ok": True, "target": symbol_or_name, "staff": _read_state().get("staff", [])})
 
 
 @mcp.tool()
-def ai_research_consensus(symbol_or_name: str = "market", allocation_percent: float = 0.0) -> dict[str, Any]:
+def ai_research_consensus(symbol_or_name: str = "market", allocation_percent: float = 0.0, ctx: Context = None) -> dict[str, Any]:
     """Show a public CodexStock-style AI research consensus observation."""
-    candidate = _find_candidate(symbol_or_name) or {
+    candidate = _find_candidate(symbol_or_name, ctx) or {
         "symbol": symbol_or_name,
         "name": symbol_or_name,
         "reason": "No exact public candidate match. Treat as a watch-only research request.",
@@ -1097,13 +1393,17 @@ def ai_research_consensus(symbol_or_name: str = "market", allocation_percent: fl
 
 
 @mcp.tool()
-def strategy_validation_summary(strategy_name: str = "public-preview") -> dict[str, Any]:
+def strategy_validation_summary(strategy_name: str = "public-preview", ctx: Context = None) -> dict[str, Any]:
     """Summarize strategy validation status without private performance claims."""
+    history = _price_history(strategy_name, limit=20, ctx=ctx)
+    history_note = "Attached public recent price history for the requested symbol-like strategy name." if history else "No symbol-like price history attached."
     return _response({
         "ok": True,
         "strategy": strategy_name,
         "status": "research preview",
         "required_evidence": ["walk-forward", "out-of-sample", "cost/slippage", "stress test", "paper observation"],
+        "recent_price_history": history,
+        "history_note": history_note,
         "public_claim": "No performance guarantee.",
     })
 
