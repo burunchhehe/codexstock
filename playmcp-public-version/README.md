@@ -125,6 +125,21 @@ python -m py_compile server.py
 python server.py
 ```
 
+Run as a local HTTP MCP endpoint:
+
+```powershell
+$env:CODEXSTOCK_PUBLIC_MCP_TRANSPORT="streamable-http"
+$env:CODEXSTOCK_PUBLIC_MCP_HOST="127.0.0.1"
+$env:CODEXSTOCK_PUBLIC_MCP_PORT="8000"
+python server.py
+```
+
+Local MCP endpoint:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
 For a hosted PlayMCP endpoint, deploy this folder as a small read-only MCP server and expose the MCP HTTP endpoint over HTTPS.
 
 ## Data Model

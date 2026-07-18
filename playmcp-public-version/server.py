@@ -8,13 +8,32 @@ from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import TransportSecuritySettings
 
-
-mcp = FastMCP("CodexStock Research")
 
 MAX_ITEMS = 8
 MAX_TEXT = 12000
 PUBLIC_DATA_DIR = os.environ.get("CODEXSTOCK_PUBLIC_DATA_DIR")
+MCP_HOST = os.environ.get("CODEXSTOCK_PUBLIC_MCP_HOST", "127.0.0.1")
+MCP_PORT = int(os.environ.get("CODEXSTOCK_PUBLIC_MCP_PORT", "8000"))
+MCP_TRANSPORT = os.environ.get("CODEXSTOCK_PUBLIC_MCP_TRANSPORT", "stdio")
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get(
+        "CODEXSTOCK_PUBLIC_ALLOWED_HOSTS",
+        f"127.0.0.1:{MCP_PORT},localhost:{MCP_PORT}",
+    ).split(",")
+    if host.strip()
+]
+
+mcp = FastMCP(
+    "CodexStock Research",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    streamable_http_path="/mcp",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(allowed_hosts=ALLOWED_HOSTS),
+)
 
 PRIVATE_PATTERNS = [
     re.compile(r"\b\d{8,14}\b"),
@@ -403,6 +422,10 @@ def sub_engine_status() -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Default stdio is useful for local MCP smoke tests. A hosted PlayMCP deployment
-    # should run this server with the MCP SDK's HTTP/streamable transport.
-    mcp.run()
+    # Default stdio is useful for local MCP smoke tests.
+    # For PlayMCP endpoint testing:
+    # $env:CODEXSTOCK_PUBLIC_MCP_TRANSPORT="streamable-http"
+    # $env:CODEXSTOCK_PUBLIC_MCP_HOST="127.0.0.1"
+    # $env:CODEXSTOCK_PUBLIC_MCP_PORT="8000"
+    # python server.py
+    mcp.run(transport=MCP_TRANSPORT)
