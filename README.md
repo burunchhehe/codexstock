@@ -6,6 +6,49 @@ It combines market monitoring, candidate discovery, strategy research, paper/liv
 
 Created and maintained by **Jinwoo Kim** (`burunchhehe`).
 
+## 30초 요약 | CodexStock at a Glance
+
+코덱스스톡은 단순 종목 추천기나 백테스트 스크립트가 아닙니다. 개인 투자자가 장전 준비부터 장중 감시, 후보 검토, 위험 통제, 주문 기록, 장후 복기와 다음 전략 개선까지 하나의 흐름으로 운영하기 위해 만든 **로컬 우선 AI 투자 연구·운영 플랫폼**입니다.
+
+```text
+시장·뉴스·공시·수급 감시
+    -> 후보 발굴과 근거 정리
+    -> 역할별 AI 직원 검토
+    -> 리스크·집중도·위임 한도 점검
+    -> Paper/실전 경계가 있는 실행 계획
+    -> 주문·체결·잔고·손익 대사
+    -> 장후 복기·놓친 종목 분석·매매일지
+    -> 검증된 교훈만 다음 판단에 반영
+```
+
+### 무엇을 할 수 있나
+
+| 영역 | 구현된 핵심 기능 |
+| --- | --- |
+| 시장 감시 | 관심종목, 거래대금·등락·유동성 레이더, 업종·테마, 뉴스·공시·거시 신호 수집 |
+| 후보 발굴 | 단타·스윙·중기·장기 후보 분리, 근거 점수, 중복 가점 억제, 업종 편중 경고 |
+| AI 직원 조직 | 연구·수급·재무·전략·매매·리스크·보고 역할이 서로 다른 근거를 남기는 7개 역할 기반 워크플로 |
+| 전략 연구 | Research Forge, 워크포워드, 리플레이, 거래비용·슬리피지, 시장국면·체결조건 검증 |
+| 하위엔진 활용 | 외부 정보 탐색, KIS 공식 게이트웨이와 선택형 퀀트·백테스트 엔진을 본체의 검증 절차로 통합 |
+| 실행 안전 | Paper/실전 분리, 위임 한도, 승인·차단 게이트, 주문 의도와 매수·매도 사유 기록 |
+| 사후 대사 | 주문·체결·잔고·손익을 다시 맞춰 보고 불일치와 설명되지 않은 차이를 탐지 |
+| 장후 학습 | 선택·탈락·놓친 종목, 진입·청산 타이밍, 재료와 시장 흐름을 반복 복기하고 다음 개선 과제로 연결 |
+| GPT/MCP | 로컬 전체 기능을 조회·진단하는 MCP와, 민감정보·실전 주문을 제외한 공개용 읽기 전용 20개 도구 |
+| 자체 진단·복구 | 1분 심장박동, 장애 분류, Telegram 보고, 안전한 허용목록 복구, GPT 외부 자문 저장과 재검증 |
+
+### 2026-07-19 확인 스냅샷
+
+- **AI 업무 역할 7개**: 연구, 수급, 재무, 전략, 매매, 리스크, 보고
+- **하위엔진 9개 운영판**: 가벼운 상태 감시와 요청형 무거운 연구를 분리
+- **로컬 MCP 기능 170개**: 상태·연구·복기·대사·외부엔진·내부개발자 기능을 GPT에서 조회 가능한 구조
+- **공개 MCP 20개**: 계좌·잔고·체결·주문·개인 기록을 제외한 읽기 전용 연구 체험판
+- **장애 대응 왕복 검증**: 내부 개발자 감지 → Telegram 단일 보고 → GPT/MCP 자문 → 정책 검사 → 로컬 재검증
+- **안전 경계**: 내부 개발자와 외부 하위엔진은 실전 주문, 소스코드 임의 수정, API 키 변경, 보안 해제를 수행할 수 없음
+
+이 숫자는 투자성과나 수익을 증명하는 수치가 아니라 **구현된 기능 표면과 운영 검증 범위**를 나타냅니다. 장기 성과는 별도의 순방향 Paper/실운용 기간과 데이터 품질 증거가 더 필요합니다.
+
+실제 화면은 [Actual UI Screenshots](#actual-ui-screenshots), 전체 기능은 [Feature Map](docs/FEATURES.md), 하위엔진 역할은 [Sub-Engines](docs/SUB_ENGINES.md), 자체 진단·복구 검증은 [Verified Upgrade](docs/VERIFIED_UPGRADE_2026-07-19.md)에서 확인할 수 있습니다.
+
 > This repository is a public evaluation build. It contains source code and non-confidential documentation only. It does not contain API keys, account numbers, live order logs, private journals, runtime databases, or personal trading records.
 
 ## Why It Exists
@@ -267,3 +310,4 @@ See [docs/ROADMAP.md](docs/ROADMAP.md).
 CodexStock is research software. It is not investment advice, a broker, a fiduciary, or a profit guarantee.
 
 Backtests, paper results, AI-generated explanations, and strategy reports can be wrong, overfit, delayed, incomplete, or unsuitable for real capital. Use at your own risk.
+
