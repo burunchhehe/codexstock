@@ -68,6 +68,18 @@ The launcher health dock:
 
 Telegram health questions use the deterministic operational-status path before attempting an LLM response. Incident delivery is routed through the existing reporting queue so the internal developer does not create a second bot receiver.
 
+### Captured Drill Evidence
+
+The screenshots below are real UI captures from the controlled drill. They contain no account number, balance, API key, live position, or order/fill history.
+
+![Telegram incident report, GPT MCP review, and accepted report-only advice](images/verified-recovery-telegram-gpt-roundtrip.png)
+
+The three panels show the notification, GPT's MCP-based incident review, and the final accepted `REPORT_ONLY`/`WRITE_INCIDENT_REPORT` guidance. The guidance did not authorize or perform a mutation.
+
+![Launcher health dock during the controlled drill](images/verified-recovery-launcher-health-dock.png)
+
+The launcher capture intentionally shows the incident-active moment. It demonstrates that the operator can see the detected condition, heartbeat age, incident/advice/report counters, quarantine history, and safely accepted guidance without opening raw runtime files. The final post-drill state was checked separately and reported zero real open incidents.
+
 ## Ollama Recovery
 
 Before local generation, CodexStock can check a loopback-only Ollama endpoint. If the local service is unavailable, it can locate the installed executable, start it in a hidden process, enforce a restart cooldown, and poll readiness. A CPU backend fallback is available for an incompatible GPU runtime.

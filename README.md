@@ -114,6 +114,24 @@ These are selected real CodexStock UI captures. They were included because they 
 
 ![CodexStock sub-engine operations board](docs/images/actual-ui-engine-board.png)
 
+## Verified Recovery Drill Screenshots
+
+The following captures are from a controlled operational drill, not a live-trading incident. No live order, account mutation, credential change, source-code edit, or security-policy change was executed.
+
+### Telegram Report To GPT Advice Roundtrip
+
+The first capture shows the same drill progressing across three surfaces: the internal developer sends one Telegram incident report through the existing reporting queue, GPT reads the stored incident through MCP, and the structured `WRITE_INCIDENT_REPORT` guidance is accepted as report-only advice.
+
+![Telegram incident report, GPT MCP review, and accepted report-only advice](docs/images/verified-recovery-telegram-gpt-roundtrip.png)
+
+### Launcher Health Dock
+
+The second capture shows the launcher while the synthetic incident is active. The dock exposes the detected issue, heartbeat age, real-incident count, GPT advice count, incident history, quarantine state, and the latest safely accepted guidance. It is draggable so it does not cover other controls.
+
+![CodexStock launcher health dock during a controlled recovery drill](docs/images/verified-recovery-launcher-health-dock.png)
+
+After the drill, the same read-only endpoint reported a fresh heartbeat, zero real open incidents, and `RECOVERED` status. See [the verification report](docs/VERIFIED_UPGRADE_2026-07-19.md) for the exact boundary and checks.
+
 ## Architecture
 
 ```mermaid
