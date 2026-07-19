@@ -1299,6 +1299,16 @@ class OperationalStatusContractTests(unittest.TestCase):
                 patch.object(stock_app, "PROMOTION_FORWARD_OBSERVATION_FILE", forward_file),
                 patch("app.stock_suite_app._discover_research_forge_promotion_candidates") as discover,
                 patch("app.stock_suite_app._create_promotion_paper_rehearsal") as create_rehearsal,
+                patch(
+                    "app.stock_suite_app.run_ai_staff_90_session_forward_ab_observer_tick",
+                    return_value={
+                        "ok": True,
+                        "status": "SESSION_CAPTURED",
+                        "recorded": True,
+                        "paper_only": True,
+                        "live_order_allowed": False,
+                    },
+                ) as forward_ab_observer,
             ):
                 result = stock_app.run_due_promotion_paper_rehearsal(
                     now=now,
@@ -1309,9 +1319,11 @@ class OperationalStatusContractTests(unittest.TestCase):
         self.assertEqual("already_recorded_for_session", result["status"])
         self.assertEqual("already_recorded_for_session", result["forward_observation"]["status"])
         self.assertEqual("2026-07-20", result["forward_observation"]["record"]["observed_date"])
+        self.assertTrue(result["forward_ab_90_session_observation"]["recorded"])
         self.assertFalse(result["live_order_allowed"])
         discover.assert_not_called()
         create_rehearsal.assert_not_called()
+        forward_ab_observer.assert_called_once()
 
     def test_forward_observer_waits_during_market_without_running_paper_batch(self):
         now = datetime(2026, 7, 20, 10, 0, tzinfo=ZoneInfo("Asia/Seoul"))
@@ -1488,7 +1500,50 @@ class OperationalStatusContractTests(unittest.TestCase):
         self.assertGreaterEqual(result["verified_forward_days"], 90)
         self.assertGreaterEqual(result["verified_observation_day_count"], 50)
         self.assertEqual(100.0, result["session_coverage_pct"])
+        integrity = result["evidence_integrity"]
+        self.assertEqual("codexstock_forward_observation_integrity_v1", integrity["schema"])
+        self.assertTrue(integrity["hash_chain_complete"])
+        self.assertEqual(rows[-1]["observation_hash"], integrity["last_observation_hash"])
+        self.assertEqual({"no_due_candidate": len(rows)}, integrity["verified_result_status_counts"])
+        self.assertEqual(0, integrity["future_rows_quarantined"])
+        self.assertFalse(integrity["live_order_allowed"])
         self.assertFalse(result["live_order_allowed"])
+
+    def test_forward_observation_audit_summarizes_candidate_and_symbol_diversity(self):
+        rows = self._forward_observation_rows(date(2026, 1, 2), date(2026, 4, 3))
+        symbols = ["005930", "000660", "035420"]
+        for index, row in enumerate(rows[:9]):
+            symbol = symbols[index % len(symbols)]
+            candidate_id = f"candidate-{index % len(symbols)}"
+            digest = [{"candidate_id": candidate_id, "symbol": symbol, "result": "paper_watch"}]
+            row["result_status"] = "completed"
+            row["candidate_result_digest"] = digest
+            row["candidate_result_hash"] = stock_app._promotion_forward_candidate_digest_hash(digest)
+            if index == 0:
+                row["previous_observation_hash"] = ""
+            else:
+                row["previous_observation_hash"] = rows[index - 1]["observation_hash"]
+            row["observation_hash"] = stock_app._promotion_forward_observation_hash(row)
+            if index + 1 < len(rows):
+                rows[index + 1]["previous_observation_hash"] = row["observation_hash"]
+                rows[index + 1]["observation_hash"] = stock_app._promotion_forward_observation_hash(rows[index + 1])
+        for index in range(9, len(rows)):
+            rows[index]["previous_observation_hash"] = rows[index - 1]["observation_hash"]
+            rows[index]["observation_hash"] = stock_app._promotion_forward_observation_hash(rows[index])
+
+        result = stock_app.build_promotion_forward_observation_audit(
+            rows,
+            now=datetime(2026, 4, 3, 16, 30, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
+
+        integrity = result["evidence_integrity"]
+
+        self.assertTrue(result["ready"])
+        self.assertTrue(integrity["hash_chain_complete"])
+        self.assertEqual(3, integrity["unique_candidate_count"])
+        self.assertEqual(3, integrity["unique_symbol_count"])
+        self.assertEqual(9, integrity["verified_result_status_counts"]["completed"])
+        self.assertEqual(len(rows) - 9, integrity["verified_result_status_counts"]["no_due_candidate"])
 
     def test_forward_observation_audit_counts_exact_90_day_window_inclusively(self):
         rows = self._forward_observation_rows(date(2026, 1, 2), date(2026, 4, 1))
@@ -1613,12 +1668,13 @@ class OperationalStatusContractTests(unittest.TestCase):
         self.assertTrue(result["heavy_slot_available"])
         self.assertTrue(result["heavy_slot_reserved"])
 
-    def test_counterfactual_background_schedule_reserves_one_paper_only_job(self):
+    def test_counterfactual_background_schedule_reserves_two_locked_paper_triplets(self):
         schedule = {
             "ok": True,
             "ready_to_run": True,
             "status": "ready_to_run",
             "queue_hash": "queue-hash",
+            "queue_triplet_count": 2,
         }
         fake_thread = MagicMock()
         fake_thread.is_alive.return_value = False
@@ -1646,6 +1702,7 @@ class OperationalStatusContractTests(unittest.TestCase):
         self.assertFalse(result["live_order_allowed"])
         self.assertFalse(result["automatic_promotion"])
         self.assertEqual("QUEUED", state["status"])
+        self.assertEqual(2, state["max_triplets"])
         self.assertTrue(state["paper_only"])
         self.assertFalse(state["live_order_allowed"])
         fake_thread.start.assert_called_once_with()

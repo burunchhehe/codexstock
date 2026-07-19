@@ -17,6 +17,11 @@ flowchart TB
     API --> STORE["Private runtime stores"]
     API --> FORGE["Research Forge"]
     API --> EXT["External engine workers"]
+    DEV["Independent internal developer sidecar"] -->|"fixed local read-only HTTP"| API
+    DEV --> DEVSTORE["Private incident/report/advice ledger"]
+    GPT -->|"read report / submit guidance"| DEVSTORE
+    DEV --> WATCHDOG["Validated restart request"]
+    WATCHDOG --> API
 
     STAFF --> DECISION["Decision context"]
     DECISION --> RISK["Risk gates"]
@@ -38,6 +43,7 @@ flowchart TB
 | Runtime records | account snapshots, journals, JSONL/SQLite state | No |
 | Generated reports | personal reports and evidence exports | No |
 | External source vaults | downloaded third-party projects | No |
+| Internal-developer records | incidents, advice, reports, playbooks, heartbeat | No |
 
 ## App Server
 
@@ -74,6 +80,38 @@ It should:
 Primary file:
 
 - `app/codexstock_mcp_server.py`
+
+## Internal Developer
+
+The internal developer is a separate sidecar rather than a free-form agent inside the main process.
+
+Primary files:
+
+- `app/internal_developer_store.py`
+- `app/internal_developer_engine.py`
+- `app/internal_developer_service.py`
+- `tools/run_internal_developer.ps1`
+- `tools/register_internal_developer.ps1`
+
+The sidecar observes only fixed local endpoints. Reports and external advice are durable data, not executable commands. Structured proposed actions must match an exact schema and a pre-registered local handler before execution. The result is then verified again.
+
+```mermaid
+flowchart LR
+    OBS["Heartbeat and read-only diagnostics"] --> CLASSIFY["Deterministic classifier"]
+    CLASSIFY --> SAFE{"Allowlisted action?"}
+    SAFE -->|"yes"| HANDLER["Registered local handler"]
+    HANDLER --> VERIFY["Post-action verification"]
+    SAFE -->|"no"| REPORT["Report and quarantine"]
+    VERIFY --> LEDGER["Incident and playbook ledger"]
+    REPORT --> LEDGER
+    LEDGER --> TELEGRAM["Existing Telegram queue"]
+    LEDGER --> LAUNCHER["Draggable launcher health dock"]
+    LEDGER --> MCP2["Read-only GPT/MCP tools"]
+    MCP2 --> ADVICE["Untrusted external guidance"]
+    ADVICE --> CLASSIFY
+```
+
+The sidecar cannot place orders, edit code, change credentials, weaken risk controls, disable security, kill processes, or delete database lock files.
 
 ## Research Forge
 

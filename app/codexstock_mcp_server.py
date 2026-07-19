@@ -44,6 +44,13 @@ try:
 except Exception:  # pragma: no cover - returned through MCP diagnostics
     ExternalKnowledgeStore = None  # type: ignore[assignment]
 
+try:
+    from internal_developer_store import InternalDeveloperStore
+    from internal_developer_engine import InternalDeveloperEngine
+except Exception:  # pragma: no cover - returned through MCP diagnostics
+    InternalDeveloperStore = None  # type: ignore[assignment]
+    InternalDeveloperEngine = None  # type: ignore[assignment]
+
 
 def _json_dump(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
@@ -186,6 +193,298 @@ def _external_knowledge_store() -> Any:
         raise RuntimeError("ExternalKnowledgeStore import failed")
     data_root = active_data_root(REPO_ROOT)
     return ExternalKnowledgeStore(data_root / "external_knowledge")
+
+
+def _internal_developer_store() -> Any:
+    if InternalDeveloperStore is None:
+        raise RuntimeError("InternalDeveloperStore import failed")
+    return InternalDeveloperStore(REPO_ROOT, data_root=Path(active_data_root(REPO_ROOT)))
+
+
+def _internal_developer_id(value: object, prefix: str) -> str:
+    candidate = str(value or "").strip().upper()
+    if not re.fullmatch(rf"{re.escape(prefix)}-[A-Z0-9][A-Z0-9_-]{{0,95}}", candidate):
+        raise ValueError(f"invalid {prefix.lower()} id")
+    return candidate
+
+
+def _internal_developer_action_summary(value: object) -> dict[str, Any]:
+    row = value if isinstance(value, dict) else {}
+    verification = row.get("post_verification") if isinstance(row.get("post_verification"), dict) else {}
+    return {
+        "action": row.get("action"),
+        "status": row.get("status"),
+        "executed": bool(row.get("executed")),
+        "reason_code": row.get("reason_code"),
+        "parameters": row.get("parameters") if isinstance(row.get("parameters"), dict) else {},
+        "verified": bool(verification.get("ok") or verification.get("success")),
+    }
+
+
+def _internal_developer_incident_summary(value: object) -> dict[str, Any]:
+    row = value if isinstance(value, dict) else {}
+    diagnostic = row.get("diagnostic") if isinstance(row.get("diagnostic"), dict) else {}
+    attempts = row.get("recovery_attempts") if isinstance(row.get("recovery_attempts"), list) else []
+    return {
+        "incident_id": row.get("incident_id"),
+        "classification": row.get("classification") or diagnostic.get("primary_issue"),
+        "component": row.get("component"),
+        "severity": row.get("severity"),
+        "state": row.get("state"),
+        "summary": row.get("summary"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "recurrence_count": row.get("recurrence_count"),
+        "reviewed": bool(row.get("reviewed")),
+        "recommended_actions": [
+            _internal_developer_action_summary(item)
+            for item in (
+                diagnostic.get("recommended_actions", [])
+                if isinstance(diagnostic.get("recommended_actions"), list)
+                else []
+            )[:8]
+        ],
+        "latest_attempt": _internal_developer_action_summary(attempts[-1]) if attempts else None,
+    }
+
+
+def _internal_developer_report_summary(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    payload = value.get("payload") if isinstance(value.get("payload"), dict) else {}
+    diagnostic = payload.get("diagnostic") if isinstance(payload.get("diagnostic"), dict) else {}
+    results = payload.get("recovery_results") if isinstance(payload.get("recovery_results"), list) else []
+    return {
+        "report_id": value.get("report_id"),
+        "incident_id": value.get("incident_id"),
+        "created_at": value.get("created_at"),
+        "updated_at": value.get("updated_at"),
+        "review_status": value.get("review_status"),
+        "status": payload.get("status"),
+        "primary_issue": diagnostic.get("primary_issue"),
+        "needs_external_advice": bool(payload.get("needs_external_advice")),
+        "advice_id": payload.get("advice_id"),
+        "source": payload.get("source"),
+        "execution_authorized": False,
+        "text_ignored": payload.get("text_ignored"),
+        "recovery_results": [
+            _internal_developer_action_summary(item) for item in results[:8]
+        ],
+    }
+
+
+def _internal_developer_advice_summary(value: object) -> dict[str, Any]:
+    row = value if isinstance(value, dict) else {}
+    advice = row.get("advice") if isinstance(row.get("advice"), dict) else {}
+    policy = row.get("policy_evaluation") if isinstance(row.get("policy_evaluation"), dict) else {}
+    application = row.get("application_result") if isinstance(row.get("application_result"), dict) else {}
+    results = application.get("results") if isinstance(application.get("results"), list) else []
+    return {
+        "advice_id": row.get("advice_id"),
+        "incident_id": row.get("incident_id"),
+        "status": row.get("status"),
+        "received_at": row.get("received_at"),
+        "updated_at": row.get("updated_at"),
+        "advisor": advice.get("advisor"),
+        "summary": advice.get("summary"),
+        "confidence": advice.get("confidence"),
+        "execution_authorized": False,
+        "quarantined": bool(policy.get("quarantined")),
+        "allowed_action_mentions": policy.get("allowed_action_mentions", []),
+        "forbidden_categories": policy.get("forbidden_categories", []),
+        "application": {
+            "executed": bool(application.get("executed")),
+            "success": bool(application.get("success")),
+            "text_ignored": application.get("text_ignored"),
+            "reason_code": application.get("reason_code"),
+            "results": [
+                _internal_developer_action_summary(item) for item in results[:8]
+            ],
+        },
+    }
+
+
+def _internal_developer_event_summary(value: object) -> dict[str, Any]:
+    row = value if isinstance(value, dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    keys = {
+        "incident_id",
+        "report_id",
+        "advice_id",
+        "playbook_id",
+        "request_id",
+        "from",
+        "to",
+        "state",
+        "status",
+        "action",
+        "quarantined",
+        "reusable",
+    }
+    return {
+        "event_id": row.get("event_id"),
+        "event_type": row.get("event_type"),
+        "created_at": row.get("created_at"),
+        "payload": {key: payload.get(key) for key in keys if key in payload},
+    }
+
+
+def _internal_developer_direct(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    store = _internal_developer_store()
+    limit = _int_arg(arguments, "limit", 50, 1, 500)
+    if name == "codexstock_internal_developer_status":
+        return store.status()
+    if name == "codexstock_internal_developer_component_status":
+        component = str(arguments.get("component") or "").strip().lower()[:120]
+        rows = store.list_incidents(limit=500)
+        if component:
+            rows = [
+                row
+                for row in rows
+                if component in str(row.get("component") or "").strip().lower()
+            ]
+        return {
+            "ok": True,
+            "component": component or "all",
+            "incident_count": len(rows),
+            "incidents": rows[:limit],
+            "status": store.status(),
+            "read_only": True,
+            "live_order_allowed": False,
+        }
+    if name == "codexstock_internal_developer_list_incidents":
+        rows = store.list_incidents(limit=500)
+        state = str(arguments.get("state") or "").strip().upper()
+        severity = str(arguments.get("severity") or "").strip().lower()
+        if state:
+            rows = [row for row in rows if str(row.get("state") or "").upper() == state]
+        if severity:
+            rows = [row for row in rows if str(row.get("severity") or "").lower() == severity]
+        return {
+            "ok": True,
+            "count": len(rows[:limit]),
+            "items": rows[:limit],
+            "filters": {"state": state, "severity": severity},
+            "read_only": True,
+            "live_order_allowed": False,
+        }
+    if name == "codexstock_internal_developer_get_incident":
+        incident_id = _internal_developer_id(arguments.get("incident_id"), "INC")
+        incident = store.get_incident(incident_id)
+        return {
+            "ok": incident is not None,
+            "incident": incident,
+            "read_only": True,
+            "live_order_allowed": False,
+        }
+    if name == "codexstock_internal_developer_latest_report":
+        rows = store.list_reports(limit=1)
+        return {
+            "ok": True,
+            "report": rows[0] if rows else None,
+            "report_available": bool(rows),
+            "read_does_not_acknowledge": True,
+            "read_only": True,
+            "live_order_allowed": False,
+        }
+    if name == "codexstock_internal_developer_brief":
+        incident_limit = _int_arg(arguments, "incident_limit", 5, 1, 20)
+        activity_limit = _int_arg(arguments, "activity_limit", 10, 1, 100)
+        reports = store.list_reports(limit=1)
+        return {
+            "ok": True,
+            "schema": "codexstock.internal-developer-brief.v1",
+            "status": store.status(),
+            "attention": store.attention_summary(),
+            "recent_incidents": [
+                _internal_developer_incident_summary(item)
+                for item in store.list_incidents(limit=incident_limit)
+            ],
+            "latest_report": _internal_developer_report_summary(reports[0]) if reports else None,
+            "recent_advice": [
+                _internal_developer_advice_summary(item)
+                for item in store.list_advice(limit=5)
+            ],
+            "recent_activity": [
+                _internal_developer_event_summary(item)
+                for item in store.activity(limit=activity_limit)
+            ],
+            "read_does_not_acknowledge": True,
+            "read_only": True,
+            "live_order_allowed": False,
+        }
+    if name == "codexstock_internal_developer_activity":
+        event_type = str(arguments.get("event_type") or "").strip().lower() or None
+        return {
+            "ok": True,
+            "items": store.list_events(limit=limit, event_type=event_type),
+            "read_only": True,
+            "live_order_allowed": False,
+        }
+    if name == "codexstock_internal_developer_readonly_diagnostics":
+        status = store.status()
+        return {
+            "ok": True,
+            "schema": "codexstock.internal-developer-readonly-diagnostics.v1",
+            "store_status": status,
+            "record_counts": status.get("counts", {}),
+            "index_rebuildable_from_individual_records": True,
+            "restart_authority": "independent_watchdog_only",
+            "automatic_code_edit": False,
+            "read_only": True,
+            "live_order_allowed": False,
+        }
+    if name == "codexstock_submit_developer_advice":
+        incident_id = _internal_developer_id(arguments.get("incident_id"), "INC")
+        proposed = arguments.get("proposed_actions")
+        if proposed is None:
+            proposed = []
+        if not isinstance(proposed, list) or len(proposed) > 8:
+            raise ValueError("proposed_actions must be an array with at most 8 items")
+        policy_decisions: list[dict[str, Any]] = []
+        if InternalDeveloperEngine is not None:
+            engine = InternalDeveloperEngine(store)
+            policy_decisions = [engine.evaluate_action(item) for item in proposed]
+        payload = {
+            "incident_id": incident_id,
+            "advisor": str(arguments.get("advisor") or "gpt-via-mcp")[:120],
+            "summary": str(arguments.get("summary") or "")[:4000],
+            "analysis": str(arguments.get("analysis") or "")[:16000],
+            "confidence": arguments.get("confidence"),
+            "proposed_actions": proposed,
+            "policy_decisions": policy_decisions,
+            "execution_authorized": False,
+            "untrusted_advice": True,
+        }
+        saved = store.submit_advice(payload)
+        return {
+            "ok": True,
+            "saved": saved,
+            "execution_authorized": False,
+            "execution_performed": False,
+            "next_step": "The independent deterministic policy engine will review structured actions.",
+            "live_order_allowed": False,
+        }
+    raise KeyError(name)
+
+
+def _attach_internal_developer_attention(payload: Any) -> dict[str, Any]:
+    result = dict(payload) if isinstance(payload, dict) else {"data": payload}
+    try:
+        attention = _internal_developer_store().attention_summary()
+        result["internal_developer"] = {
+            **attention,
+            "served_by": "mcp-direct-store",
+            "read_does_not_acknowledge": True,
+        }
+        result["developer_attention_required"] = bool(attention.get("attention_required"))
+    except Exception as exc:
+        result["internal_developer"] = {
+            "available": False,
+            "error": f"{type(exc).__name__}: {exc}"[:500],
+            "live_order_allowed": False,
+        }
+    return result
 
 
 def _external_knowledge_direct(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -463,8 +762,16 @@ def _is_public_diagnostic_code(key: object, value: object) -> bool:
     if _is_sensitive_key(key):
         return False
     diagnostic_keys = {
+        "action",
         "blocker",
         "blockers",
+        "classification",
+        "component",
+        "event_type",
+        "issue_code",
+        "primary_issue",
+        "reason_code",
+        "report_type",
         "warning",
         "warnings",
         "status",
@@ -502,6 +809,10 @@ def _is_public_identifier_value(key: object, value: object) -> bool:
     if _is_sensitive_key(key):
         return False
     public_identifier_keys = {
+        "schema",
+        "schema_version",
+        "service_schema",
+        "store_schema",
         "server_name",
         "server_version",
         "contract_schema_version",
@@ -516,6 +827,36 @@ def _is_public_identifier_value(key: object, value: object) -> bool:
     if normalized not in public_identifier_keys:
         return False
     return bool(re.fullmatch(r"[A-Za-z0-9_.:-]{2,180}", str(value or "")))
+
+
+def _is_public_internal_developer_id(key: object, value: object) -> bool:
+    """Keep opaque internal-developer record IDs usable across MCP calls.
+
+    These IDs contain no account, order, credential, or money data.  The key
+    allow-list and prefix allow-list are deliberately narrow so the exception
+    cannot expose similarly shaped trading identifiers.
+    """
+
+    normalized = _normalize_key(key)
+    if normalized not in {
+        "incident_id",
+        "report_id",
+        "advice_id",
+        "event_id",
+        "playbook_id",
+        "request_id",
+        "attempt_id",
+        "latest_incident_id",
+        "latest_report_id",
+        "latest_advice_id",
+    }:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:INC|REP|ADV|EVT|PB|RST|ATT)-[A-Z0-9][A-Z0-9_-]{0,95}",
+            str(value or "").upper(),
+        )
+    )
 
 
 def _is_public_profile_id(key: object, value: object) -> bool:
@@ -593,6 +934,8 @@ def _sanitize_for_mcp(value: Any, key: object = "") -> Any:
         if _is_public_hash_value(key, value):
             return value
         if _is_public_diagnostic_code(key, value):
+            return value
+        if _is_public_internal_developer_id(key, value):
             return value
         if _is_public_identifier_value(key, value):
             return value
@@ -789,6 +1132,18 @@ def _live_order_blackbox_tool_result(data: Any, max_chars: int) -> dict[str, Any
 def _mcp_tool_category(name: str) -> str:
     if name in RESEARCH_TOOL_NAMES:
         return "research_forge"
+    if name in {
+        "codexstock_internal_developer_status",
+        "codexstock_internal_developer_component_status",
+        "codexstock_internal_developer_list_incidents",
+        "codexstock_internal_developer_get_incident",
+        "codexstock_internal_developer_latest_report",
+        "codexstock_internal_developer_brief",
+        "codexstock_internal_developer_activity",
+        "codexstock_internal_developer_readonly_diagnostics",
+        "codexstock_submit_developer_advice",
+    }:
+        return "internal_developer"
     if name in {
         "codexstock_mcp_manifest",
         "codexstock_status",
@@ -1450,6 +1805,15 @@ def _external_improvement_status_summary(payload: Any) -> dict[str, Any]:
 
 
 ASK_AGENT_ROUTABLE_TOOLS = {
+    "codexstock_internal_developer_status",
+    "codexstock_internal_developer_component_status",
+    "codexstock_internal_developer_list_incidents",
+    "codexstock_internal_developer_get_incident",
+    "codexstock_internal_developer_latest_report",
+    "codexstock_internal_developer_brief",
+    "codexstock_internal_developer_activity",
+    "codexstock_internal_developer_readonly_diagnostics",
+    "codexstock_submit_developer_advice",
     "codexstock_external_signal_inbox",
     "codexstock_external_signal_stage2_queue",
     "codexstock_external_signal_stage2_result",
@@ -1534,7 +1898,7 @@ def _agent_local_fallback(question: str, max_chars: int) -> dict[str, Any] | Non
                 {
                     "ok": False,
                     "blocked": True,
-                    "message": "codexstock_ask_agent router only allows safe external-learning MCP tools.",
+                    "message": "codexstock_ask_agent router only allows bounded internal-developer and external-learning MCP tools.",
                     "requested_tool": tool_name,
                     "allowed_tools": sorted(ASK_AGENT_ROUTABLE_TOOLS),
                     "mcp_server_manifest": _mcp_manifest(),
@@ -1550,6 +1914,41 @@ def _agent_local_fallback(question: str, max_chars: int) -> dict[str, Any] | Non
         return result
 
     compact = re.sub(r"\s+", "", question.lower())
+    internal_developer_tokens = (
+        "internaldeveloper",
+        "internal-developer",
+        "internal_developer",
+        "internaldev",
+        "selfrepair",
+        "developerreport",
+        "내부개발자",
+        "자체수리",
+        "수리보고서",
+        "장애보고서",
+    )
+    if any(token in compact for token in internal_developer_tokens):
+        if any(token in compact for token in ("diagnostic", "diagnosis", "진단", "점검")):
+            tool_name = "codexstock_internal_developer_readonly_diagnostics"
+            routed_arguments: dict[str, Any] = {}
+        elif any(token in compact for token in ("latestreport", "report", "보고서")):
+            tool_name = "codexstock_internal_developer_latest_report"
+            routed_arguments = {}
+        elif any(token in compact for token in ("activity", "audit", "활동", "기록")):
+            tool_name = "codexstock_internal_developer_activity"
+            routed_arguments = {"limit": 20}
+        elif any(token in compact for token in ("incident", "incidents", "장애", "사건")):
+            tool_name = "codexstock_internal_developer_list_incidents"
+            routed_arguments = {"limit": 20}
+        else:
+            tool_name = "codexstock_internal_developer_brief"
+            routed_arguments = {"incident_limit": 5, "activity_limit": 10}
+        routed_arguments["max_chars"] = max_chars
+        result = _call_tool(tool_name, routed_arguments)
+        if isinstance(result, dict):
+            result["routed_via"] = "codexstock_ask_agent"
+            result["routed_tool"] = tool_name
+            result["schema_cache_fallback"] = True
+        return result
     if any(token in compact for token in ("mcp", "tools/list", "toolmanifest", "toolcount", "manifest", "도구", "함수")):
         return _tool_result({"ok": True, "handled_by": "mcp-local-manifest", "mcp_server_manifest": _mcp_manifest()}, max_chars=max_chars)
     external_signal_tokens = (
@@ -3417,6 +3816,82 @@ TOOLS = [
             "full": {"type": "boolean", "default": False, "description": "Legacy alias for detail='full'."},
         },
     ),
+    _tool(
+        "codexstock_internal_developer_status",
+        "Return current self-repair status, open incident counts, and unreviewed developer attention from the local direct store.",
+    ),
+    _tool(
+        "codexstock_internal_developer_component_status",
+        "Return internal-developer incidents for one named component. Read-only.",
+        {
+            "component": {"type": "string", "maxLength": 120, "default": ""},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+        },
+    ),
+    _tool(
+        "codexstock_internal_developer_list_incidents",
+        "List local operational incidents without marking reports reviewed.",
+        {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+            "state": {"type": "string", "maxLength": 40, "default": ""},
+            "severity": {"type": "string", "maxLength": 32, "default": ""},
+        },
+    ),
+    _tool(
+        "codexstock_internal_developer_get_incident",
+        "Get one internal-developer incident and its recovery evidence. Read-only.",
+        {"incident_id": {"type": "string", "pattern": "^INC-[A-Za-z0-9_-]{1,96}$"}},
+        ["incident_id"],
+    ),
+    _tool(
+        "codexstock_internal_developer_latest_report",
+        "Return the latest developer escalation or recovery report without acknowledging it.",
+    ),
+    _tool(
+        "codexstock_internal_developer_brief",
+        "Return a compact GPT handoff containing health, attention, recent incidents, latest report, and activity.",
+        {
+            "incident_limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+            "activity_limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+        },
+    ),
+    _tool(
+        "codexstock_internal_developer_activity",
+        "Return recent internal-developer audit activity. Read-only.",
+        {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+            "event_type": {"type": "string", "maxLength": 64, "default": ""},
+        },
+    ),
+    _tool(
+        "codexstock_internal_developer_readonly_diagnostics",
+        "Check the local internal-developer store and safety boundary without repairing, restarting, or submitting orders.",
+    ),
+    _tool(
+        "codexstock_submit_developer_advice",
+        "Store bounded GPT advice as untrusted guidance. This tool never executes the advice or grants recovery authority.",
+        {
+            "incident_id": {"type": "string", "pattern": "^INC-[A-Za-z0-9_-]{1,96}$"},
+            "advisor": {"type": "string", "maxLength": 120, "default": "gpt-via-mcp"},
+            "summary": {"type": "string", "maxLength": 4000},
+            "analysis": {"type": "string", "maxLength": 16000},
+            "confidence": {"type": ["number", "string", "null"]},
+            "proposed_actions": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "parameters": {"type": "object", "additionalProperties": True},
+                    },
+                    "required": ["action", "parameters"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        ["incident_id", "summary"],
+    ),
     _tool("codexstock_scorecard", "Return CodexStock maturity scorecard.", {"refresh": {"type": "boolean", "default": False}}),
     _tool(
         "codexstock_staff_status",
@@ -3808,7 +4283,26 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             cache_ttl_seconds=2.0 if detail != "full" else 0.0,
             stale_if_error_seconds=120.0 if detail != "full" else 0.0,
         )
+        payload = _attach_internal_developer_attention(payload)
         return _tool_result(_attach_mcp_manifest(payload), max_chars=max_chars)
+    if name == "codexstock_internal_developer_status":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
+    if name == "codexstock_internal_developer_component_status":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
+    if name == "codexstock_internal_developer_list_incidents":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
+    if name == "codexstock_internal_developer_get_incident":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
+    if name == "codexstock_internal_developer_latest_report":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
+    if name == "codexstock_internal_developer_brief":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
+    if name == "codexstock_internal_developer_activity":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
+    if name == "codexstock_internal_developer_readonly_diagnostics":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
+    if name == "codexstock_submit_developer_advice":
+        return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
     if name == "codexstock_scorecard":
         refresh = _bool_arg(arguments, "refresh", False)
         return _tool_result(

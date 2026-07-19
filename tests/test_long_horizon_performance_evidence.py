@@ -302,6 +302,88 @@ class LongHorizonPerformanceEvidenceTests(unittest.TestCase):
         self.assertTrue(result["adaptive_training_system"]["challenge_mode"])
         self.assertEqual(6, result["adaptive_training_system"]["strategy_trials_per_staff_per_season"])
 
+    def test_refresh_rebuilds_benchmark_to_common_staff_actual_window(self):
+        requested_end = "2026-01-03"
+        staff = copy.deepcopy(self.staff)
+        staff["cost_model"].update(
+            {
+                "policy_version": "mandatory-market-specific-paper-costs.v2",
+                "us_regulatory_fee_policy_version": "us-sec-finra-date-aware.v1",
+            }
+        )
+        stale_benchmark = copy.deepcopy(self.benchmark)
+        stale_benchmark.update(
+            {
+                "requested_end_date": requested_end,
+                "last_date": requested_end,
+                "fx_policy_version": "ecos-boundary-fallback.v1",
+            }
+        )
+        aligned_benchmark = copy.deepcopy(self.benchmark)
+        aligned_benchmark["fx_policy_version"] = "ecos-boundary-fallback.v1"
+        payload = {
+            "ok": True,
+            "schema": "codexstock_ai_staff_long_horizon_v2",
+            "run_once_key": LONG_HORIZON_VERIFICATION_CONTRACT_VERSION,
+            "start_date": self.start_date,
+            "end_date": requested_end,
+            "benchmark": stale_benchmark,
+            "staff": [staff],
+        }
+        with (
+            patch("app.stock_suite_app._long_horizon_spy_benchmark", return_value=aligned_benchmark) as rebuild,
+            patch("app.stock_suite_app._save_ai_staff_long_horizon_benchmark") as save,
+        ):
+            result = _refresh_ai_staff_long_horizon_benchmark(payload)
+
+        rebuild.assert_called_once_with(self.start_date, self.end_date)
+        self.assertEqual(
+            "common_staff_actual_window",
+            result["benchmark_measurement_window"]["status"],
+        )
+        self.assertEqual(self.end_date, result["benchmark_measurement_window"]["end_date"])
+        self.assertFalse(result["rerun_required"])
+        self.assertTrue(result["staff"][0]["performance_evidence"]["passed"])
+        save.assert_called_once()
+
+    def test_refresh_does_not_coerce_divergent_staff_windows(self):
+        first = copy.deepcopy(self.staff)
+        second = copy.deepcopy(self.staff)
+        second["contestant_id"] = "staff-2"
+        second["actual_end_date"] = "2026-01-01"
+        second["data_coverage"]["actual_end_date"] = "2026-01-01"
+        for staff in (first, second):
+            staff["cost_model"].update(
+                {
+                    "policy_version": "mandatory-market-specific-paper-costs.v2",
+                    "us_regulatory_fee_policy_version": "us-sec-finra-date-aware.v1",
+                }
+            )
+        benchmark = copy.deepcopy(self.benchmark)
+        benchmark["fx_policy_version"] = "ecos-boundary-fallback.v1"
+        benchmark["dividend_adjusted_cagr_pct"] = 8.0
+        payload = {
+            "ok": True,
+            "schema": "codexstock_ai_staff_long_horizon_v2",
+            "run_once_key": LONG_HORIZON_VERIFICATION_CONTRACT_VERSION,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "benchmark": benchmark,
+            "staff": [first, second],
+        }
+        with (
+            patch("app.stock_suite_app._long_horizon_spy_benchmark") as rebuild,
+            patch("app.stock_suite_app._save_ai_staff_long_horizon_benchmark"),
+        ):
+            result = _refresh_ai_staff_long_horizon_benchmark(payload)
+
+        rebuild.assert_not_called()
+        self.assertEqual(
+            "staff_measurement_window_inconsistent_or_incomplete",
+            result["benchmark_measurement_window"]["status"],
+        )
+        self.assertTrue(result["rerun_required"])
+
     def test_legacy_staff_rows_require_rerun_and_get_explicit_walk_forward_blocker(self):
         payload = {
             "ok": True,

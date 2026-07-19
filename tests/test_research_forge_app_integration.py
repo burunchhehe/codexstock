@@ -397,6 +397,73 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         self.assertEqual(["vectorbt"], failed["failed_components"])
         self.assertEqual("round_trip_failed", failed["connection_stage"])
 
+    def test_external_engine_diagnosis_distinguishes_order_gateway_from_research_delay(self) -> None:
+        kis = stock_suite_app._external_engine_operational_diagnosis(
+            {
+                "engine_id": "kis-trading-mcp",
+                "connection_stage": "adapter_ready_round_trip_pending",
+                "connection_blockers": ["successful_round_trip_evidence_missing"],
+                "runtime": {"blockers": ["paper_auth_missing"]},
+                "live_order_allowed": False,
+            },
+            operational_state="verification_pending",
+        )
+        research = stock_suite_app._external_engine_operational_diagnosis(
+            {
+                "engine_id": "vectorbt",
+                "connection_stage": "adapter_ready_round_trip_pending",
+                "connection_blockers": ["successful_round_trip_evidence_missing"],
+                "live_order_allowed": False,
+            },
+            operational_state="verification_pending",
+        )
+
+        self.assertEqual("round_trip_evidence_missing", kis["root_cause_code"])
+        self.assertEqual("order_critical", kis["importance_level"])
+        self.assertEqual("order_gateway_unavailable", kis["order_impact"])
+        self.assertFalse(kis["degraded_but_order_safe"])
+        self.assertIn("paper_auth_missing", kis["diagnosis_blockers"])
+        self.assertEqual("round_trip_evidence_missing", research["root_cause_code"])
+        self.assertEqual("research_critical", research["importance_level"])
+        self.assertEqual("no_direct_order_impact", research["order_impact"])
+        self.assertTrue(research["degraded_but_order_safe"])
+
+    def test_external_engine_health_surface_carries_root_cause_and_recovery_action(self) -> None:
+        dashboard = {
+            "ok": True,
+            "generated_at": "2026-07-18T09:00:00+09:00",
+            "summary": {"engine_count": 1},
+            "engines": [
+                {
+                    "engine_id": "vectorbt",
+                    "display_name": "vectorbt",
+                    "status": "preparing",
+                    "operational_state": "verification_pending",
+                    "connection_stage": "adapter_ready_round_trip_pending",
+                    "root_cause_code": "round_trip_evidence_missing",
+                    "root_cause": "Adapter exists but proof is missing.",
+                    "diagnosis_blockers": ["successful_round_trip_evidence_missing"],
+                    "importance_level": "research_critical",
+                    "order_impact": "no_direct_order_impact",
+                    "recovery_action": "Run vectorbt smoke proof.",
+                    "degraded_but_order_safe": True,
+                    "last_checked_at": "2026-07-18T09:00:00+09:00",
+                    "last_success_at": "",
+                }
+            ],
+        }
+
+        surface = stock_suite_app._compact_external_engine_health_surface(dashboard)
+        engine = surface["engines"][0]
+
+        self.assertEqual("round_trip_evidence_missing", engine["root_cause_code"])
+        self.assertEqual("Adapter exists but proof is missing.", engine["root_cause"])
+        self.assertEqual(["successful_round_trip_evidence_missing"], engine["diagnosis_blockers"])
+        self.assertEqual("research_critical", engine["importance_level"])
+        self.assertEqual("no_direct_order_impact", engine["order_impact"])
+        self.assertTrue(engine["degraded_but_order_safe"])
+        self.assertEqual("Run vectorbt smoke proof.", engine["next_action"])
+
     def test_verified_improvement_cycle_proves_specialist_formal_connection(self) -> None:
         evidence = stock_suite_app._external_engine_formal_connection_evidence(
             {

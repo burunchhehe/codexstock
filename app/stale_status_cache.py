@@ -18,6 +18,8 @@ class StaleWhileRefreshStatusCache:
         cache_path: Path,
         schema_version: str,
         ttl_seconds: int = 15,
+        max_refresh_seconds: float = 300.0,
+        retry_delay_seconds: float = 15.0,
         durable_validator: Callable[[dict[str, object]], bool] | None = None,
         bootstrap_payload: dict[str, object] | None = None,
     ) -> None:
@@ -25,6 +27,8 @@ class StaleWhileRefreshStatusCache:
         self._cache_path = Path(cache_path)
         self._schema_version = schema_version
         self._ttl_seconds = max(1, int(ttl_seconds))
+        self._max_refresh_seconds = max(0.05, float(max_refresh_seconds))
+        self._retry_delay_seconds = max(0.0, float(retry_delay_seconds))
         self._durable_validator = durable_validator
         self._bootstrap_payload = (
             dict(bootstrap_payload)
@@ -35,10 +39,14 @@ class StaleWhileRefreshStatusCache:
         self._payload: dict[str, object] = {}
         self._saved_at = 0.0
         self._refreshing = False
+        self._refresh_started_at_monotonic = 0.0
+        self._refresh_generation = 0
+        self._next_retry_at_monotonic = 0.0
         self._last_refresh_error = ""
 
     def get(self) -> dict[str, object]:
         now = time.time()
+        now_monotonic = time.monotonic()
         with self._lock:
             self._load_durable_locked()
             if not self._payload and self._bootstrap_payload:
@@ -50,10 +58,39 @@ class StaleWhileRefreshStatusCache:
             payload = dict(self._payload)
             saved_at = self._saved_at
             refreshing = self._refreshing
-            if payload and now - saved_at > self._ttl_seconds and not refreshing:
+            refresh_elapsed = (
+                now_monotonic - self._refresh_started_at_monotonic
+                if refreshing and self._refresh_started_at_monotonic > 0.0
+                else 0.0
+            )
+            if refreshing and refresh_elapsed > self._max_refresh_seconds:
+                self._refresh_generation += 1
+                self._refreshing = False
+                self._refresh_started_at_monotonic = 0.0
+                self._next_retry_at_monotonic = (
+                    now_monotonic + self._retry_delay_seconds
+                )
+                self._last_refresh_error = (
+                    "TimeoutError: status refresh exceeded "
+                    f"{self._max_refresh_seconds:.2f}s"
+                )
+                refreshing = False
+            if (
+                payload
+                and now - saved_at > self._ttl_seconds
+                and not refreshing
+                and now_monotonic >= self._next_retry_at_monotonic
+            ):
                 self._refreshing = True
+                self._refresh_started_at_monotonic = now_monotonic
+                self._refresh_generation += 1
+                refresh_generation = self._refresh_generation
                 refreshing = True
-                threading.Thread(target=self._refresh, daemon=True).start()
+                threading.Thread(
+                    target=self._refresh,
+                    args=(refresh_generation,),
+                    daemon=True,
+                ).start()
 
         if payload:
             return self._decorate(payload, saved_at, refreshing)
@@ -74,9 +111,68 @@ class StaleWhileRefreshStatusCache:
         return self._decorate(built, time.time(), False)
 
     def refresh_now(self) -> dict[str, object]:
-        built = self._build()
-        self._store(built)
-        return self._decorate(built, time.time(), False)
+        with self._lock:
+            self._refresh_generation += 1
+            refresh_generation = self._refresh_generation
+            self._refreshing = True
+            self._refresh_started_at_monotonic = time.monotonic()
+        try:
+            built = self._build()
+            self._store(built, refresh_generation=refresh_generation)
+            return self._decorate(built, time.time(), False)
+        finally:
+            with self._lock:
+                if refresh_generation == self._refresh_generation:
+                    self._refreshing = False
+                    self._refresh_started_at_monotonic = 0.0
+
+    def request_refresh(self) -> dict[str, object]:
+        """Start one background refresh and return the current status immediately."""
+        now = time.time()
+        now_monotonic = time.monotonic()
+        payload: dict[str, object] = {}
+        saved_at = 0.0
+        already_refreshing = False
+        with self._lock:
+            self._load_durable_locked()
+            if not self._payload and self._bootstrap_payload:
+                self._payload = {
+                    **self._bootstrap_payload,
+                    "status_cache_bootstrap": True,
+                }
+                self._saved_at = now - self._ttl_seconds - 1.0
+            payload = dict(self._payload)
+            saved_at = self._saved_at
+            if self._refreshing:
+                already_refreshing = True
+            else:
+                self._refreshing = True
+                self._refresh_started_at_monotonic = now_monotonic
+                self._refresh_generation += 1
+                refresh_generation = self._refresh_generation
+                threading.Thread(
+                    target=self._refresh,
+                    args=(refresh_generation,),
+                    daemon=True,
+                ).start()
+        if already_refreshing:
+            return self._decorate(payload, saved_at, True) if payload else {
+                "ok": False,
+                "cached": False,
+                "stale": False,
+                "refreshing": True,
+                "cache_age_seconds": 0,
+            }
+        if payload:
+            return self._decorate(payload, saved_at, True)
+        return {
+            "ok": False,
+            "cached": False,
+            "stale": False,
+            "refreshing": True,
+            "cache_age_seconds": 0,
+            "status": "refresh_requested",
+        }
 
     def _build(self) -> dict[str, object]:
         payload = self._builder()
@@ -84,17 +180,31 @@ class StaleWhileRefreshStatusCache:
             raise ValueError("status builder returned an empty payload")
         return dict(payload)
 
-    def _refresh(self) -> None:
+    def _refresh(self, refresh_generation: int) -> None:
         try:
-            self._store(self._build())
+            self._store(
+                self._build(),
+                refresh_generation=refresh_generation,
+            )
         except Exception as exc:
             with self._lock:
-                self._last_refresh_error = f"{type(exc).__name__}: {exc}"
+                if refresh_generation == self._refresh_generation:
+                    self._last_refresh_error = f"{type(exc).__name__}: {exc}"
+                    self._next_retry_at_monotonic = (
+                        time.monotonic() + self._retry_delay_seconds
+                    )
         finally:
             with self._lock:
-                self._refreshing = False
+                if refresh_generation == self._refresh_generation:
+                    self._refreshing = False
+                    self._refresh_started_at_monotonic = 0.0
 
-    def _store(self, payload: dict[str, object]) -> None:
+    def _store(
+        self,
+        payload: dict[str, object],
+        *,
+        refresh_generation: int | None = None,
+    ) -> bool:
         saved_at = time.time()
         durable_payload = dict(payload)
         for key in (
@@ -107,9 +217,15 @@ class StaleWhileRefreshStatusCache:
         ):
             durable_payload.pop(key, None)
         with self._lock:
+            if (
+                refresh_generation is not None
+                and refresh_generation != self._refresh_generation
+            ):
+                return False
             self._payload = durable_payload
             self._saved_at = saved_at
             self._last_refresh_error = ""
+            self._next_retry_at_monotonic = 0.0
         record = {
             "schema_version": self._schema_version,
             "saved_at_epoch": saved_at,
@@ -117,11 +233,14 @@ class StaleWhileRefreshStatusCache:
         }
         try:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = self._cache_path.with_name(f"{self._cache_path.name}.{os.getpid()}.tmp")
+            temp_path = self._cache_path.with_name(
+                f"{self._cache_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
             temp_path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
             os.replace(temp_path, self._cache_path)
         except OSError:
-            return
+            return True
+        return True
 
     def _load_durable_locked(self) -> None:
         if self._payload:
@@ -156,6 +275,11 @@ class StaleWhileRefreshStatusCache:
         age = max(0.0, time.time() - saved_at)
         with self._lock:
             error = self._last_refresh_error
+            refresh_elapsed = (
+                max(0.0, time.monotonic() - self._refresh_started_at_monotonic)
+                if refreshing and self._refresh_started_at_monotonic > 0.0
+                else 0.0
+            )
         return {
             **payload,
             "cached": True,
@@ -164,4 +288,7 @@ class StaleWhileRefreshStatusCache:
             "cache_age_seconds": round(age, 2),
             "cache_source": "stale_while_refresh",
             "status_cache_error": error,
+            "refresh_timed_out": error.startswith("TimeoutError:"),
+            "refresh_elapsed_seconds": round(refresh_elapsed, 2),
+            "refresh_timeout_seconds": round(self._max_refresh_seconds, 2),
         }

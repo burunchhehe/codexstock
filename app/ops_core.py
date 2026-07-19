@@ -946,6 +946,7 @@ class HepiOpsCore:
                 "simple_trade_live_plan": 0,
                 "simple_trade_live_execution": 0,
                 "external_signal_alert": 10,
+                "internal_developer_urgent": 0,
                 "command_reply": 0,
                 "manual": 0,
             },
@@ -960,6 +961,7 @@ class HepiOpsCore:
                 "simple_trade_live_plan": 20,
                 "simple_trade_live_execution": 20,
                 "external_signal_alert": 3,
+                "internal_developer_urgent": 5,
                 "command_reply": 20,
                 "manual": 5,
             },
@@ -977,6 +979,7 @@ class HepiOpsCore:
                 "simple_trade_live_plan",
                 "simple_trade_live_execution",
                 "external_signal_alert",
+                "internal_developer_urgent",
                 "command_reply",
                 "manual",
             ],
@@ -1052,6 +1055,7 @@ class HepiOpsCore:
                 "simple_trade_live_plan",
                 "simple_trade_live_execution",
                 "external_signal_alert",
+                "internal_developer_urgent",
             ):
                 if required_type not in allowed_list:
                     allowed_list.append(required_type)
@@ -1138,6 +1142,32 @@ class HepiOpsCore:
                     metadata=metadata,
                     reason=reason,
                 )
+            single_delivery_id = str(
+                metadata.get("single_delivery_id") or metadata.get("incident_id") or ""
+            ).strip()
+            if metadata.get("single_delivery") is True and single_delivery_id:
+                for row in reversed(recent_rows):
+                    row_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    row_delivery_id = str(
+                        row_metadata.get("single_delivery_id")
+                        or row_metadata.get("incident_id")
+                        or ""
+                    ).strip()
+                    if (
+                        str(row.get("message_type") or "") == message_type
+                        and row_metadata.get("single_delivery") is True
+                        and row_delivery_id == single_delivery_id
+                    ):
+                        return self._telegram_policy_skip_record(
+                            status="deduped",
+                            text=text,
+                            message_type=message_type,
+                            source=source,
+                            fingerprint=fingerprint,
+                            metadata=metadata,
+                            reason="single_delivery incident was already queued",
+                            matched_id=str(row.get("id", "")),
+                        )
             if policy.get("dedupe_enabled", True):
                 dedupe_window = float(policy.get("dedupe_window_minutes", 20) or 0)
                 for row in reversed(recent_rows):

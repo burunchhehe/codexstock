@@ -317,6 +317,7 @@ const TAB_ORDER_STORAGE_KEY = "codexStock.tabOrder";
 const HUNDRED_LAB_HIDE_RISK_STORAGE_KEY = "codexStock.hundredLab.hideHighRisk";
 const HUNDRED_LAB_EFFICIENCY_SORT_STORAGE_KEY = "codexStock.hundredLab.efficiencySort";
 const CAPITAL_ACTION_HISTORY_STORAGE_KEY = "codexStock.capitalActionHistory";
+const INTERNAL_DEVELOPER_POSITION_STORAGE_KEY = "codexStock.internalDeveloperPosition";
 function savedHundredLabHideRisk() {
   try {
     return localStorage.getItem(HUNDRED_LAB_HIDE_RISK_STORAGE_KEY) === "1";
@@ -3914,6 +3915,200 @@ async function loadSystemResources() {
       <small>${escapeHtml(error.message || "다시 시도 중")}</small>
     `;
   }
+}
+
+function internalDeveloperAgeLabel(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value)) return "확인 필요";
+  if (value < 60) return `${Math.max(0, Math.round(value))}초 전`;
+  if (value < 3600) return `${Math.round(value / 60)}분 전`;
+  return `${Math.round(value / 3600)}시간 전`;
+}
+
+function internalDeveloperStatusLabel(value) {
+  const labels = {
+    NEW: "새 사건",
+    DIAGNOSING: "원인 진단",
+    AUTO_RECOVERING: "안전 복구 중",
+    RECOVERY_FAILED: "복구 실패",
+    NEEDS_EXTERNAL_ADVICE: "외부 자문 필요",
+    ADVICE_RECEIVED: "자문 수신",
+    RETRYING: "재검증 중",
+    NEEDS_CODE_FIX: "개발자 검토 필요",
+    WAITING_FOR_RESTART: "재시작 대기",
+    RECOVERED_UNREVIEWED: "복구 확인 대기",
+    REVIEWED: "검토 완료",
+    CLOSED: "종료",
+    RECEIVED: "수신",
+    ACCEPTED_AS_GUIDANCE: "안전 자문 반영",
+    QUARANTINED: "안전 격리",
+  };
+  return labels[String(value || "")] || String(value || "기록");
+}
+
+function renderInternalDeveloperStatus(result = {}) {
+  const dock = el("#internalDeveloperDock");
+  if (!dock) return;
+  const counts = result.counts || {};
+  const heartbeat = result.heartbeat || {};
+  const latestAdvice = result.latest_advice || null;
+  const currentIncident = result.current_incident || null;
+  const history = Array.isArray(result.history) ? result.history : [];
+  dock.dataset.tone = result.tone || "offline";
+  setText("internalDeveloperLabel", result.label || "상태 확인 필요");
+  setText("internalDeveloperSummary", result.status === "INCIDENT"
+    ? "내부 개발자가 이상을 감지했습니다"
+    : result.status === "RECOVERED"
+      ? "자문·재검증 기록이 정상 저장됐습니다"
+      : "내부 개발자가 계속 감시하고 있습니다");
+  setText("internalDeveloperPanelTitle", result.label || "상태 확인 필요");
+  setText("internalDeveloperMessage", result.message || "내부 개발자 상태를 확인할 수 없습니다.");
+  setText("internalDeveloperOpenCount", `${Number(counts.real_open_incidents || 0)}건`);
+  setText("internalDeveloperAdviceCount", `${Number(counts.advice || 0)}건`);
+  setText("internalDeveloperHeartbeat", internalDeveloperAgeLabel(heartbeat.age_seconds));
+  setText("internalDeveloperUpdatedAt", result.generated_at
+    ? `최근 확인 ${new Date(result.generated_at).toLocaleTimeString()}`
+    : "조회 시각 없음");
+
+  const latestNode = el("#internalDeveloperLatest");
+  if (latestNode) {
+    latestNode.innerHTML = currentIncident
+      ? `<article><strong>현재 이상 · ${escapeHtml(internalDeveloperStatusLabel(currentIncident.state))}</strong><span>${escapeHtml(currentIncident.summary || currentIncident.id || "확인 필요")}</span></article>`
+      : latestAdvice
+        ? `<article><strong>최근 GPT 자문 · ${escapeHtml(internalDeveloperStatusLabel(latestAdvice.status))}</strong><span>${escapeHtml(latestAdvice.id || "-")} · ${escapeHtml(latestAdvice.summary || "자문 결과가 원장에 저장됐습니다.")}</span></article>`
+        : `<article><strong>현재 실제 장애 없음</strong><span>새 장애가 생기면 이 자리에 원인과 상태가 표시됩니다.</span></article>`;
+  }
+
+  const historyNode = el("#internalDeveloperHistory");
+  if (historyNode) {
+    historyNode.innerHTML = history.length
+      ? history.slice(0, 4).map((row) => `<article>
+          <strong>${row.type === "advice" ? "GPT 자문" : row.drill ? "가상훈련" : "장애 기록"} · ${escapeHtml(internalDeveloperStatusLabel(row.status))}</strong>
+          <span>${escapeHtml(row.id || "-")} · ${escapeHtml(row.summary || "상세 기록 저장됨")}</span>
+        </article>`).join("")
+      : `<article><strong>누적 기록 없음</strong><span>장애·자문·복구 기록이 생기면 자동으로 표시됩니다.</span></article>`;
+  }
+}
+
+async function loadInternalDeveloperStatus(silent = true) {
+  try {
+    const response = await fetch("/api/internal-developer/launcher-status");
+    const result = await response.json();
+    if (!response.ok || result.ok === false) throw new Error(result.error || "내부 개발자 상태 조회 실패");
+    renderInternalDeveloperStatus(result);
+    if (!silent) addLog(`내부 개발자: ${result.label || result.status || "상태 확인"}`);
+    return result;
+  } catch (error) {
+    renderInternalDeveloperStatus({
+      tone: "offline",
+      status: "OFFLINE",
+      label: "감시자 연결 확인",
+      message: error.message || "내부 개발자 상태를 불러오지 못했습니다.",
+      counts: {},
+      heartbeat: {},
+      history: [],
+    });
+    if (!silent) addLog(`내부 개발자 상태 조회 실패: ${error.message}`);
+    return null;
+  }
+}
+
+function readInternalDeveloperPosition() {
+  try {
+    const value = JSON.parse(localStorage.getItem(INTERNAL_DEVELOPER_POSITION_STORAGE_KEY) || "null");
+    if (!Number.isFinite(Number(value?.left)) || !Number.isFinite(Number(value?.top))) return null;
+    return { left: Number(value.left), top: Number(value.top) };
+  } catch (_) {
+    return null;
+  }
+}
+
+function placeInternalDeveloperDock(dock, left, top, save = false) {
+  const margin = 8;
+  const width = Math.max(1, dock.offsetWidth || 228);
+  const height = Math.max(1, dock.querySelector("summary")?.offsetHeight || 56);
+  const nextLeft = Math.max(margin, Math.min(window.innerWidth - width - margin, Number(left) || margin));
+  const nextTop = Math.max(margin, Math.min(window.innerHeight - height - margin, Number(top) || margin));
+  dock.style.left = `${Math.round(nextLeft)}px`;
+  dock.style.top = `${Math.round(nextTop)}px`;
+  dock.style.right = "auto";
+  dock.dataset.panelAlign = nextLeft + width / 2 < window.innerWidth / 2 ? "left" : "right";
+  dock.dataset.panelDirection = nextTop > window.innerHeight * 0.52 ? "up" : "down";
+  if (save) {
+    try {
+      localStorage.setItem(
+        INTERNAL_DEVELOPER_POSITION_STORAGE_KEY,
+        JSON.stringify({ left: Math.round(nextLeft), top: Math.round(nextTop) }),
+      );
+    } catch (_) {}
+  }
+}
+
+function bindInternalDeveloperDock() {
+  const dock = el("#internalDeveloperDock");
+  const summary = dock?.querySelector("summary");
+  if (!dock || !summary || dock.dataset.dragBound === "1") return;
+  dock.dataset.dragBound = "1";
+  dock.dataset.panelAlign = "right";
+  dock.dataset.panelDirection = "down";
+
+  const saved = readInternalDeveloperPosition();
+  if (saved) placeInternalDeveloperDock(dock, saved.left, saved.top);
+
+  let pointerId = null;
+  let startX = 0;
+  let startY = 0;
+  let originLeft = 0;
+  let originTop = 0;
+  let moved = false;
+  let suppressClick = false;
+
+  summary.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.target.closest("button")) return;
+    const rect = dock.getBoundingClientRect();
+    pointerId = event.pointerId;
+    startX = event.clientX;
+    startY = event.clientY;
+    originLeft = rect.left;
+    originTop = rect.top;
+    moved = false;
+    summary.setPointerCapture(pointerId);
+  });
+
+  summary.addEventListener("pointermove", (event) => {
+    if (pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - startX;
+    const deltaY = event.clientY - startY;
+    if (!moved && Math.hypot(deltaX, deltaY) < 6) return;
+    moved = true;
+    suppressClick = true;
+    dock.classList.add("dragging");
+    event.preventDefault();
+    placeInternalDeveloperDock(dock, originLeft + deltaX, originTop + deltaY, true);
+  });
+
+  const finishDrag = (event) => {
+    if (pointerId !== event.pointerId) return;
+    if (moved) {
+      const rect = dock.getBoundingClientRect();
+      placeInternalDeveloperDock(dock, rect.left, rect.top, true);
+    }
+    dock.classList.remove("dragging");
+    try { summary.releasePointerCapture(pointerId); } catch (_) {}
+    pointerId = null;
+  };
+  summary.addEventListener("pointerup", finishDrag);
+  summary.addEventListener("pointercancel", finishDrag);
+  summary.addEventListener("click", (event) => {
+    if (!suppressClick) return;
+    event.preventDefault();
+    event.stopPropagation();
+    suppressClick = false;
+  });
+  window.addEventListener("resize", () => {
+    const rect = dock.getBoundingClientRect();
+    placeInternalDeveloperDock(dock, rect.left, rect.top, Boolean(readInternalDeveloperPosition()));
+  });
 }
 
 async function loadIntegrations() {
@@ -13500,6 +13695,7 @@ function bindEvents() {
   ensureStrategyChartControls();
   bindMainPriceChartControls();
   bindTabOrderControls();
+  bindInternalDeveloperDock();
   el("#appTitle").addEventListener("dblclick", beginAppNameEdit);
   el("#appTitle").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -13527,6 +13723,11 @@ function bindEvents() {
   });
   el("#refreshExternalEngines")?.addEventListener("click", () => loadExternalEngineDashboard(false));
   el("#runExternalImprovement")?.addEventListener("click", () => runExternalEngineImprovement());
+  el("#refreshInternalDeveloper")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    loadInternalDeveloperStatus(false);
+  });
   el("#copyProgramIntro")?.addEventListener("click", copyProgramIntro);
   el("#downloadProgramIntro")?.addEventListener("click", downloadProgramIntro);
   el("#copyFriendReleaseCommand")?.addEventListener("click", copyFriendReleaseCommand);
@@ -14062,6 +14263,7 @@ async function boot() {
   loadTodayTradeQuickSummary(true).catch((error) => addLog(`오늘 매매 요약 조회 실패: ${error.message}`));
   loadExternalKnowledge(true).catch((error) => addLog(`외부학습 조회 실패: ${error.message}`));
   loadExternalEngineDashboard(true).catch((error) => addLog(`외부 엔진 상태 조회 실패: ${error.message}`));
+  loadInternalDeveloperStatus(true).catch((error) => addLog(`내부 개발자 상태 조회 실패: ${error.message}`));
   loadLiveAccountChanges(true).catch((error) => addLog(`실계좌 변화 감지 실패: ${error.message}`));
   loadIntradayMinuteRadar(true).catch((error) => addLog(`분봉 레이더 조회 실패: ${error.message}`));
   loadKisRankRadar(true).catch((error) => addLog(`한투 거래대금 랭킹 조회 실패: ${error.message}`));
@@ -14121,6 +14323,7 @@ async function boot() {
   setInterval(() => loadTodayTradeQuickSummary(true), 30000);
   setInterval(() => loadExternalKnowledge(true), 120000);
   setInterval(() => loadExternalEngineDashboard(true), 5000);
+  setInterval(() => loadInternalDeveloperStatus(true), 15000);
   setInterval(() => { if (!isKoreaMarketPriorityWindow()) loadFriendReleaseReadiness(); }, 120000);
   setInterval(loadAutopilot, 30000);
   setInterval(loadHealthSnapshots, 30000);

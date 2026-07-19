@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -191,6 +192,35 @@ class UnifiedMarketContextTests(unittest.TestCase):
         self.assertTrue(rows[2]["fresh_verified"])
         self.assertEqual("UNKNOWN", rows[3]["freshness_state"])
         self.assertFalse(rows[3]["fresh_verified"])
+
+    def test_official_daily_fx_uses_weekday_age_across_weekend(self):
+        now = datetime(2026, 7, 19, 12, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        recent_official = {
+            "observed_at": "20260716",
+            "source": "BOK ECOS",
+            "evidence_origin": "internal_official_api",
+            "verified": True,
+        }
+        old_official = {
+            "observed_at": "20260714",
+            "source": "BOK ECOS",
+            "evidence_origin": "internal_official_api",
+            "verified": True,
+        }
+        rows = [recent_official, old_official]
+
+        _annotate_market_context_freshness("fx_rates", rows, now=now)
+
+        self.assertEqual("FRESH", recent_official["freshness_state"])
+        self.assertTrue(recent_official["fresh_verified"])
+        self.assertEqual(1, recent_official["weekday_age"])
+        self.assertEqual(
+            "official_daily_fx_weekday_age",
+            recent_official["freshness_policy"],
+        )
+        self.assertEqual("STALE", old_official["freshness_state"])
+        self.assertFalse(old_official["fresh_verified"])
+        self.assertEqual(3, old_official["weekday_age"])
 
     def test_verified_external_economic_calendar_can_complete_decision_context(self):
         now = datetime.now(ZoneInfo("Asia/Seoul"))
@@ -750,6 +780,74 @@ class UnifiedMarketContextTests(unittest.TestCase):
         self.assertTrue(all(row["score_allowed"] is False for row in article_rows))
         self.assertEqual(2, result["summary"]["event_multi_source_original_count"])
 
+    def test_same_theme_and_decline_direction_link_differently_worded_originals(self):
+        report = {
+            "issues": [
+                {
+                    "name": "Semiconductor/AI",
+                    "items": [
+                        {
+                            "title": "Semiconductor selling drives Nasdaq lower - Media A",
+                            "source": "Media A",
+                            "link": "https://media-a.test/article/decline-1",
+                            "source_home_url": "https://media-a.test",
+                            "published": "Tue, 14 Jul 2026 01:00:00 GMT",
+                        },
+                        {
+                            "title": "Black Monday fears after continued selloff - Media B",
+                            "source": "Media B",
+                            "link": "https://media-b.test/article/decline-2",
+                            "source_home_url": "https://media-b.test",
+                            "published": "Tue, 14 Jul 2026 02:00:00 GMT",
+                        },
+                    ],
+                }
+            ]
+        }
+        with TemporaryDirectory() as directory, patch(
+            "app.stock_suite_app.MARKET_NEWS_EVIDENCE_CACHE_FILE", Path(directory) / "news.json"
+        ), patch("app.stock_suite_app.load_dart_corp_code_map", return_value={}):
+            result = build_market_news_evidence(report=report, force=True)
+
+        article_rows = [row for row in result["rows"] if not row.get("official_disclosure_primary")]
+        self.assertEqual(2, len(article_rows))
+        self.assertTrue(all(row["event_level_multi_source_original_corroborated"] for row in article_rows))
+        self.assertTrue(all("sharp_decline" in row["event_shared_feature_keys"] for row in article_rows))
+        self.assertEqual(2, result["summary"]["event_multi_source_original_count"])
+
+    def test_opposite_directions_do_not_share_event_corroboration(self):
+        report = {
+            "issues": [
+                {
+                    "name": "Semiconductor/AI",
+                    "items": [
+                        {
+                            "title": "Semiconductor rally sends market higher - Media A",
+                            "source": "Media A",
+                            "link": "https://media-a.test/article/rise",
+                            "source_home_url": "https://media-a.test",
+                            "published": "Tue, 14 Jul 2026 01:00:00 GMT",
+                        },
+                        {
+                            "title": "Semiconductor selloff sends market lower - Media B",
+                            "source": "Media B",
+                            "link": "https://media-b.test/article/fall",
+                            "source_home_url": "https://media-b.test",
+                            "published": "Tue, 14 Jul 2026 02:00:00 GMT",
+                        },
+                    ],
+                }
+            ]
+        }
+        with TemporaryDirectory() as directory, patch(
+            "app.stock_suite_app.MARKET_NEWS_EVIDENCE_CACHE_FILE", Path(directory) / "news.json"
+        ), patch("app.stock_suite_app.load_dart_corp_code_map", return_value={}):
+            result = build_market_news_evidence(report=report, force=True)
+
+        article_rows = [row for row in result["rows"] if not row.get("official_disclosure_primary")]
+        self.assertTrue(all(not row["event_level_multi_source_original_corroborated"] for row in article_rows))
+        self.assertEqual(0, result["summary"]["event_multi_source_original_count"])
+
     def test_future_dart_disclosure_cannot_verify_earlier_article(self):
         report = {
             "issues": [
@@ -836,6 +934,359 @@ class UnifiedMarketContextTests(unittest.TestCase):
         self.assertEqual(1, row["publisher_domain_mismatch_count"])
         self.assertFalse(row["original_source_confirmed"])
         self.assertEqual("PUBLISHER_ATTRIBUTED", row["evidence_grade"])
+
+    def test_news_evidence_gap_names_missing_independent_original_sources(self):
+        report = {
+            "issues": [
+                {
+                    "name": "AI 반도체",
+                    "items": [
+                        {
+                            "title": "AI 반도체 수요 확대",
+                            "source": "매체A",
+                            "link": "https://news.google.com/articles/a",
+                            "source_home_url": "https://media-a.test",
+                            "published": "Tue, 14 Jul 2026 01:00:00 GMT",
+                        }
+                    ],
+                }
+            ]
+        }
+        resolution = {
+            "status": "RESOLVED_ORIGINAL_URL",
+            "aggregator_url": "https://news.google.com/articles/a",
+            "original_url": "https://media-a.test/article/1",
+            "publisher_url": "https://media-a.test",
+            "original_host": "media-a.test",
+            "error": "",
+        }
+        with TemporaryDirectory() as directory, patch(
+            "app.stock_suite_app.MARKET_NEWS_EVIDENCE_CACHE_FILE", Path(directory) / "news.json"
+        ), patch(
+            "app.stock_suite_app.MARKET_NEWS_EVIDENCE_COLLECTION_REQUEST_FILE",
+            Path(directory) / "news_request.json",
+        ), patch(
+            "app.stock_suite_app.load_dart_corp_code_map", return_value={}
+        ), patch(
+            "app.stock_suite_app._resolve_news_original_url", return_value=resolution
+        ):
+            result = build_market_news_evidence(report=report, force=True)
+            persisted = Path(directory) / "news_request.json"
+            self.assertTrue(persisted.exists())
+            saved = json.loads(persisted.read_text(encoding="utf-8"))
+
+        gap = result["evidence_gap"]
+        request = result["external_collection_request"]
+        self.assertEqual(1, result["summary"]["max_independent_original_domain_count"])
+        self.assertEqual(1, result["summary"]["missing_independent_original_domain_count"])
+        self.assertTrue(gap["original_article_requirement_satisfied"])
+        self.assertFalse(gap["independent_multi_source_requirement_satisfied"])
+        self.assertIn(
+            "collect_second_independent_original_article_domain_for_same_event",
+            gap["next_actions"],
+        )
+        self.assertFalse(gap["score_allowed_until_resolved"])
+        self.assertFalse(gap["live_order_allowed_until_resolved"])
+        self.assertEqual("PENDING_EXTERNAL_NEWS_ORIGINAL_COLLECTION", request["status"])
+        self.assertEqual(1, request["requested_event_count"])
+        self.assertEqual(
+            "COLLECT_INFORMATION_ONLY",
+            request["action"],
+        )
+        self.assertFalse(request["safety"]["score_allowed"])
+        self.assertFalse(request["safety"]["live_order_allowed"])
+        self.assertEqual(request["request_id"], saved["request_id"])
+        self.assertEqual(
+            "codexstock_market_news_evidence_collection_response_v1",
+            request["delivery"]["response_schema"],
+        )
+        self.assertTrue(request["delivery"]["response_write_file"].endswith("market_news_evidence_collection_response.json"))
+        self.assertEqual("VERIFY_ONLY", request["delivery"]["response_contract"]["decision_policy"])
+        self.assertFalse(request["delivery"]["response_template"]["live_order_allowed"])
+        self.assertEqual(
+            report["issues"][0]["items"][0]["title"],
+            request["delivery"]["response_template"]["resolved_events"][0]["request_headline"],
+        )
+
+    def test_news_collection_response_adds_second_independent_original_source(self):
+        headline = "AI semiconductor demand rally"
+        report = {
+            "issues": [
+                {
+                    "name": "AI semiconductor",
+                    "items": [
+                        {
+                            "title": headline,
+                            "source": "Media A",
+                            "link": "https://news.google.com/articles/a",
+                            "source_home_url": "https://media-a.test",
+                            "published": "Tue, 14 Jul 2026 01:00:00 GMT",
+                        }
+                    ],
+                }
+            ]
+        }
+        response = {
+            "schema": "codexstock_market_news_evidence_collection_response_v1",
+            "request_id": "req-1",
+            "generated_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat(),
+            "action": "VERIFY_ONLY",
+            "source_report_fingerprint": "prior-request-fingerprint",
+            "score_allowed": False,
+            "live_order_allowed": False,
+            "safety": {"score_allowed": False, "live_order_allowed": False},
+            "resolved_events": [
+                {
+                    "request_headline": headline,
+                    "headline": headline,
+                    "sources": [
+                        {
+                            "source": "Media B",
+                            "source_url": "https://media-b.test/article/2",
+                            "publisher_url": "https://media-b.test",
+                            "headline": headline,
+                            "observed_at": "Tue, 14 Jul 2026 01:05:00 GMT",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        def resolve(link, publisher_url="", headline="", *, timeout=4.0):
+            if "news.google.com" in str(link):
+                return {
+                    "status": "RESOLVED_ORIGINAL_URL",
+                    "aggregator_url": str(link),
+                    "original_url": "https://media-a.test/article/1",
+                    "publisher_url": "https://media-a.test",
+                    "original_host": "media-a.test",
+                    "error": "",
+                }
+            return {
+                "status": "DIRECT_ORIGINAL_URL",
+                "aggregator_url": "",
+                "original_url": str(link),
+                "publisher_url": str(publisher_url),
+                "original_host": "media-b.test",
+                "error": "",
+            }
+
+        with TemporaryDirectory() as directory:
+            response_path = Path(directory) / "news_response.json"
+            response_path.write_text(json.dumps(response), encoding="utf-8")
+            with patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_CACHE_FILE", Path(directory) / "news.json"
+            ), patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_COLLECTION_REQUEST_FILE",
+                Path(directory) / "news_request.json",
+            ), patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_COLLECTION_RESPONSE_FILE",
+                response_path,
+            ), patch(
+                "app.stock_suite_app.load_dart_corp_code_map", return_value={}
+            ), patch(
+                "app.stock_suite_app._resolve_news_original_url", side_effect=resolve
+            ):
+                result = build_market_news_evidence(report=report, force=True)
+
+        row = result["rows"][0]
+        response_status = result["external_collection_response_evidence"]
+        self.assertTrue(response_status["source_usable"])
+        self.assertEqual(1, response_status["accepted_source_record_count"])
+        self.assertTrue(response_status["current_event_revalidation_required"])
+        self.assertTrue(response_status["accepted_via_current_event_revalidation"])
+        self.assertEqual(2, row["independent_original_domain_count"])
+        self.assertEqual(["media-a.test", "media-b.test"], row["independent_original_domains"])
+        self.assertEqual(1, result["summary"]["multi_source_original_count"])
+        self.assertEqual(0, result["summary"]["missing_independent_original_domain_count"])
+        self.assertTrue(result["evidence_gap"]["independent_multi_source_requirement_satisfied"])
+        self.assertTrue(
+            result["evidence_gap"]["claim_level_multi_source_requirement_satisfied"]
+        )
+        self.assertNotIn(
+            "collect_second_independent_original_article_domain_for_same_event",
+            result["evidence_gap"]["next_actions"],
+        )
+        self.assertFalse(result["live_order_allowed"])
+
+    def test_news_collection_response_rejects_aggregator_as_original_source(self):
+        headline = "AI semiconductor demand rally"
+        report = {
+            "issues": [
+                {
+                    "name": "AI semiconductor",
+                    "items": [
+                        {
+                            "title": headline,
+                            "source": "Media A",
+                            "link": "https://news.google.com/articles/a",
+                            "source_home_url": "https://media-a.test",
+                            "published": "Tue, 14 Jul 2026 01:00:00 GMT",
+                        }
+                    ],
+                }
+            ]
+        }
+        response = {
+            "schema": "codexstock_market_news_evidence_collection_response_v1",
+            "request_id": "req-1",
+            "generated_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat(),
+            "action": "VERIFY_ONLY",
+            "source_report_fingerprint": "prior-request-fingerprint",
+            "score_allowed": False,
+            "live_order_allowed": False,
+            "safety": {"score_allowed": False, "live_order_allowed": False},
+            "resolved_events": [
+                {
+                    "request_headline": headline,
+                    "sources": [
+                        {
+                            "source": "Aggregator",
+                            "source_url": "https://news.google.com/articles/b",
+                            "publisher_url": "https://media-b.test",
+                            "headline": headline,
+                        }
+                    ],
+                }
+            ],
+        }
+        resolution = {
+            "status": "RESOLVED_ORIGINAL_URL",
+            "aggregator_url": "https://news.google.com/articles/a",
+            "original_url": "https://media-a.test/article/1",
+            "publisher_url": "https://media-a.test",
+            "original_host": "media-a.test",
+            "error": "",
+        }
+        with TemporaryDirectory() as directory:
+            response_path = Path(directory) / "news_response.json"
+            response_path.write_text(json.dumps(response), encoding="utf-8")
+            with patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_CACHE_FILE", Path(directory) / "news.json"
+            ), patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_COLLECTION_REQUEST_FILE",
+                Path(directory) / "news_request.json",
+            ), patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_COLLECTION_RESPONSE_FILE",
+                response_path,
+            ), patch(
+                "app.stock_suite_app.load_dart_corp_code_map", return_value={}
+            ), patch(
+                "app.stock_suite_app._resolve_news_original_url", return_value=resolution
+            ):
+                result = build_market_news_evidence(report=report, force=True)
+
+        response_status = result["external_collection_response_evidence"]
+        self.assertFalse(response_status["source_usable"])
+        self.assertEqual(0, response_status["accepted_source_record_count"])
+        self.assertIn("no_accepted_original_sources", response_status["blockers"])
+        self.assertEqual(1, result["summary"]["max_independent_original_domain_count"])
+
+    def test_news_collection_bridge_reads_external_outbox_response_and_mirrors_request(self):
+        headline = "AI semiconductor demand rally"
+        report = {
+            "issues": [
+                {
+                    "name": "AI semiconductor",
+                    "items": [
+                        {
+                            "title": headline,
+                            "source": "Media A",
+                            "link": "https://news.google.com/articles/a",
+                            "source_home_url": "https://media-a.test",
+                            "published": "Tue, 14 Jul 2026 01:00:00 GMT",
+                        }
+                    ],
+                }
+            ]
+        }
+        response = {
+            "schema": "codexstock_market_news_evidence_collection_response_v1",
+            "request_id": "req-bridge",
+            "generated_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat(),
+            "action": "VERIFY_ONLY",
+            "source_report_fingerprint": "prior-request-fingerprint",
+            "score_allowed": False,
+            "live_order_allowed": False,
+            "safety": {"score_allowed": False, "live_order_allowed": False},
+            "resolved_events": [
+                {
+                    "request_headline": headline,
+                    "headline": headline,
+                    "sources": [
+                        {
+                            "source": "Media B",
+                            "source_url": "https://media-b.test/article/2",
+                            "publisher_url": "https://media-b.test",
+                            "headline": headline,
+                            "observed_at": "Tue, 14 Jul 2026 01:05:00 GMT",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        def resolve(link, publisher_url="", headline="", *, timeout=4.0):
+            if "news.google.com" in str(link):
+                return {
+                    "status": "RESOLVED_ORIGINAL_URL",
+                    "aggregator_url": str(link),
+                    "original_url": "https://media-a.test/article/1",
+                    "publisher_url": "https://media-a.test",
+                    "original_host": "media-a.test",
+                    "error": "",
+                }
+            return {
+                "status": "DIRECT_ORIGINAL_URL",
+                "aggregator_url": "",
+                "original_url": str(link),
+                "publisher_url": str(publisher_url),
+                "original_host": "media-b.test",
+                "error": "",
+            }
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            bridge = root / "external_outbox"
+            bridge.mkdir()
+            bridge_response = bridge / "market_news_evidence_collection_response.json"
+            bridge_response.write_text(json.dumps(response), encoding="utf-8")
+            local_request = root / "local_request.json"
+            bridge_request = bridge / "market_news_evidence_collection_request.json"
+            with patch.dict("os.environ", {"CODEXSTOCK_EXTERNAL_SIGNAL_OUTBOX": str(bridge)}), patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_CACHE_FILE", root / "news.json"
+            ), patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_COLLECTION_REQUEST_FILE",
+                local_request,
+            ), patch(
+                "app.stock_suite_app.MARKET_NEWS_EVIDENCE_COLLECTION_RESPONSE_FILE",
+                root / "local_missing_response.json",
+            ), patch(
+                "app.stock_suite_app.load_dart_corp_code_map", return_value={}
+            ), patch(
+                "app.stock_suite_app._resolve_news_original_url", side_effect=resolve
+            ):
+                result = build_market_news_evidence(report=report, force=True)
+                local_request_exists = local_request.exists()
+                bridge_request_exists = bridge_request.exists()
+
+        response_status = result["external_collection_response_evidence"]
+        request_save = result["external_collection_request_save"]
+        self.assertTrue(response_status["source_usable"])
+        self.assertEqual(str(bridge_response), response_status["active_response_file"])
+        self.assertTrue(
+            any(
+                item["path"] == str(bridge_response) and item["exists"]
+                for item in response_status["response_file_candidates"]
+            )
+        )
+        self.assertEqual(2, result["summary"]["max_independent_original_domain_count"])
+        self.assertTrue(result["evidence_gap"]["independent_multi_source_requirement_satisfied"])
+        self.assertEqual(str(bridge_response), result["evidence_gap"]["external_collection_response_evidence"]["active_response_file"])
+        self.assertEqual(2, request_save["saved_count"])
+        self.assertTrue(local_request_exists)
+        self.assertTrue(bridge_request_exists)
+        self.assertIn(str(bridge_request), result["external_collection_request"]["delivery"]["request_write_files"])
 
 
 if __name__ == "__main__":

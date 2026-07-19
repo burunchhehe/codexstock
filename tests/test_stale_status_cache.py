@@ -93,6 +93,68 @@ class StaleWhileRefreshStatusCacheTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual("new", current["value"])
 
+    def test_hung_refresh_times_out_and_cannot_overwrite_newer_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "status.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "test.v1",
+                        "saved_at_epoch": time.time() - 60,
+                        "payload": {"ok": True, "value": "old"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            first_started = threading.Event()
+            release_first = threading.Event()
+            calls = 0
+
+            def builder():
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    first_started.set()
+                    release_first.wait(2)
+                    return {"ok": True, "value": "obsolete"}
+                return {"ok": True, "value": "fresh"}
+
+            cache = StaleWhileRefreshStatusCache(
+                builder=builder,
+                cache_path=cache_path,
+                schema_version="test.v1",
+                ttl_seconds=1,
+                max_refresh_seconds=0.05,
+                retry_delay_seconds=0.01,
+            )
+            try:
+                first = cache.get()
+                self.assertTrue(first_started.wait(1))
+                self.assertTrue(first["refreshing"])
+
+                time.sleep(0.07)
+                timed_out = cache.get()
+                self.assertFalse(timed_out["refreshing"])
+                self.assertTrue(timed_out["refresh_timed_out"])
+                self.assertIn("TimeoutError", timed_out["status_cache_error"])
+
+                time.sleep(0.02)
+                current = cache.get()
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    current = cache.get()
+                    if current.get("value") == "fresh":
+                        break
+                    time.sleep(0.01)
+                self.assertEqual("fresh", current["value"])
+                self.assertEqual(2, calls)
+
+                release_first.set()
+                time.sleep(0.05)
+                self.assertEqual("fresh", cache.get()["value"])
+            finally:
+                release_first.set()
+
     def test_bootstrap_payload_makes_the_first_request_non_blocking(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_path = Path(temp_dir) / "status.json"
@@ -162,6 +224,44 @@ class StaleWhileRefreshStatusCacheTests(unittest.TestCase):
                 schema_version="test.v1",
             )
             self.assertEqual(7, second.get()["value"])
+
+    def test_request_refresh_returns_cached_payload_without_blocking(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "status.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "test.v1",
+                        "saved_at_epoch": time.time(),
+                        "payload": {"ok": True, "value": "old"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            started = threading.Event()
+            release = threading.Event()
+
+            def builder():
+                started.set()
+                release.wait(2)
+                return {"ok": True, "value": "new"}
+
+            cache = StaleWhileRefreshStatusCache(
+                builder=builder,
+                cache_path=cache_path,
+                schema_version="test.v1",
+            )
+            try:
+                before = time.perf_counter()
+                result = cache.request_refresh()
+                elapsed = time.perf_counter() - before
+
+                self.assertLess(elapsed, 0.25)
+                self.assertEqual("old", result["value"])
+                self.assertTrue(result["refreshing"])
+                self.assertTrue(started.wait(1))
+            finally:
+                release.set()
 
 
 if __name__ == "__main__":

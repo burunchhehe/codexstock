@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>코덱스스톡 HTS</title>
-    <link rel="stylesheet" href="./styles.css?v=20260713-navigation-no-progress" />
+    <link rel="stylesheet" href="./styles.css?v=20260719-internal-developer-drag-v2" />
   </head>
   <body>
     <main class="app-shell">
@@ -32,6 +32,40 @@
       </header>
 
       <section class="ticker-strip" id="tickerStrip"></section>
+
+      <aside class="internal-developer-dock" id="internalDeveloperDock" data-tone="loading">
+        <details id="internalDeveloperDetails">
+          <summary title="짧게 누르면 상세 기록, 잡아서 끌면 자유롭게 이동합니다">
+            <span class="internal-developer-dot" aria-hidden="true"></span>
+            <span class="internal-developer-summary-copy">
+              <strong id="internalDeveloperLabel">기능 점검 중</strong>
+              <small id="internalDeveloperSummary">내부 개발자 연결 확인</small>
+            </span>
+            <span class="internal-developer-chevron" aria-hidden="true">⌄</span>
+          </summary>
+          <section class="internal-developer-panel" aria-live="polite">
+            <header>
+              <div>
+                <small>코덱스스톡 내부 개발자</small>
+                <strong id="internalDeveloperPanelTitle">상태 확인 중</strong>
+              </div>
+              <button id="refreshInternalDeveloper" type="button">지금 확인</button>
+            </header>
+            <p id="internalDeveloperMessage">장애·자문·복구 원장을 확인하고 있습니다.</p>
+            <div class="internal-developer-metrics">
+              <div><b id="internalDeveloperOpenCount">-</b><small>실제 이상</small></div>
+              <div><b id="internalDeveloperAdviceCount">-</b><small>GPT 자문</small></div>
+              <div><b id="internalDeveloperHeartbeat">-</b><small>최근 감시</small></div>
+            </div>
+            <div class="internal-developer-latest" id="internalDeveloperLatest"></div>
+            <div class="internal-developer-history" id="internalDeveloperHistory"></div>
+            <footer>
+              <span id="internalDeveloperUpdatedAt">조회 대기</span>
+              <small>텔레그램과 같은 내부 개발자 원장을 읽습니다.</small>
+            </footer>
+          </section>
+        </details>
+      </aside>
 
       <div id="workspaceSubviewHost" class="workspace-subview-host" aria-live="polite"></div>
 
@@ -1873,6 +1907,6 @@
     </section>
     <script src="./external-engine-dashboard.js?v=20260717-improvement-loop"></script>
     <script src="./workspace-subpages.js?v=20260713-instant-menu-navigation"></script>
-    <script src="./app.js?v=20260713-navigation-no-progress"></script>
+    <script src="./app.js?v=20260719-internal-developer-drag-v2"></script>
   </body>
 </html>

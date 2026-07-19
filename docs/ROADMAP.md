@@ -14,6 +14,12 @@ This roadmap separates engineering maturity from investment-performance proof.
 - paper/live safety separation
 - reconciliation-focused trading operation structures
 - tests covering many safety and workflow contracts
+- independent internal-developer sidecar
+- heartbeat/progress-aware watchdog handoff
+- incident, report, advice, event, and verified-playbook ledgers
+- Telegram and launcher operational-health visibility
+- GPT/MCP external-guidance intake with quarantine and revalidation
+- local Ollama startup recovery with bounded CPU fallback
 
 ## Near-Term Public Hardening
 
@@ -24,6 +30,7 @@ This roadmap separates engineering maturity from investment-performance proof.
 5. Create a compact public MCP facade with 18-20 read-only tools.
 6. Add GitHub Actions for syntax checks and a lightweight test subset.
 7. Add an English quick-start video or short walkthrough.
+8. Add a sanitized internal-developer demo trace to first-run onboarding.
 
 ## Research and Evidence Hardening
 
@@ -41,6 +48,14 @@ This roadmap separates engineering maturity from investment-performance proof.
 3. Improve simple Telegram reporting for live/paper distinction.
 4. Record every buy/sell reason and exit plan in a queryable journal.
 5. Strengthen blocked-order explanations and recovery actions.
+
+## Operations and Recovery Hardening
+
+1. Accumulate long-duration evidence for heartbeat and watchdog stability.
+2. Test additional real-world failure modes without relaxing the action allowlist.
+3. Add user-facing acknowledgement and closure controls for recovered incidents.
+4. Add token/advice retention controls for public MCP deployments.
+5. Keep code changes, credential changes, security changes, and live-order actions human-reviewed.
 
 ## Packaging
 

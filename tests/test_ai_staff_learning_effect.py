@@ -1314,11 +1314,164 @@ class AiStaffLearningEffectTests(unittest.TestCase):
             self.assertEqual(1, due["due_count"])
             self.assertEqual(contract["contract_id"], due["selected_due_contract"]["contract_id"])
             self.assertEqual(1, due["selected_due_contract"]["remaining_triplet_count"])
+            self.assertTrue(due["same_period_auto_judgement_due"])
+            self.assertEqual("DUE_NOW", due["same_period_auto_judgement_status"])
+            self.assertEqual("2026-07-20", due["same_period_auto_judgement_target_start_date"])
+            self.assertEqual("2026-09-18", due["same_period_auto_judgement_target_end_date"])
+            self.assertEqual("2026-09-21", due["same_period_auto_judgement_first_eligible_run_date"])
+            self.assertEqual(0, due["same_period_auto_judgement_days_until_due"])
+            self.assertEqual(1, due["same_period_auto_judgement_remaining_triplet_count"])
+            self.assertEqual(
+                "run_oldest_matured_preregistered_paper_triplet",
+                due["same_period_auto_judgement_required_action"],
+            )
+            runbook = due["same_period_auto_judgement_runbook"]
+            self.assertEqual(
+                "_maybe_schedule_ai_staff_learning_counterfactual",
+                runbook["execution_function"],
+            )
+            self.assertIn(
+                "app-startup-learning-proof-catch-up",
+                runbook["trigger_sources"],
+            )
+            self.assertEqual(
+                "run_ai_staff_learning_counterfactual_triplet_batch",
+                runbook["batch_function"],
+            )
+            self.assertTrue(runbook["catch_up_after_restart"])
+            self.assertFalse(runbook["live_order_allowed"])
             self.assertTrue(due["catch_up_after_restart"])
             self.assertEqual("NO_INCOMPLETE_PREREGISTRATION", completed["status"])
             self.assertEqual(1, completed["completed_count"])
             self.assertEqual(0, completed["due_count"])
             self.assertFalse(completed["live_order_allowed"])
+
+    def test_same_period_collection_monitor_flags_missing_forward_sessions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            preregistration_path = root / "learning-preregistrations.jsonl"
+            prep_path = root / "learning-prep.json"
+            forward_contract_path = root / "forward-ab-contract.json"
+            forward_ledger_path = root / "forward-ab-ledger.jsonl"
+            experiment_status = {
+                "ready": True,
+                "hash_valid": True,
+                "safe_to_execute_paper": True,
+                "path": str(root / "learning-contract.json"),
+                "contract_hash": "source-contract-hash",
+                "blocked_count": 0,
+                "blocked": [],
+                "runnable": [
+                    {
+                        "contestant_id": "operator",
+                        "display_name": "operator",
+                        "runs_after_precondition": [
+                            "prior_official_source",
+                            "same_period_baseline",
+                            "same_period_adapted",
+                        ],
+                    }
+                ],
+            }
+            with (
+                patch(
+                    "app.stock_suite_app.build_ai_staff_learning_experiment_status",
+                    return_value=experiment_status,
+                ),
+                patch(
+                    "app.stock_suite_app._ai_staff_verified_learning_contexts",
+                    return_value=self._causal_contexts("operator"),
+                ),
+                patch(
+                    "app.stock_suite_app.AI_STAFF_LEARNING_ADAPTATION_PREP_FILE",
+                    prep_path,
+                ),
+                patch(
+                    "app.stock_suite_app.AI_STAFF_LEARNING_COUNTERFACTUAL_PREREGISTRATION_FILE",
+                    preregistration_path,
+                ),
+                patch.object(
+                    stock_app,
+                    "AI_STAFF_90_SESSION_FORWARD_AB_CONTRACT_FILE",
+                    forward_contract_path,
+                ),
+                patch.object(
+                    stock_app,
+                    "AI_STAFF_90_SESSION_FORWARD_AB_LEDGER_FILE",
+                    forward_ledger_path,
+                ),
+            ):
+                ensure_ai_staff_learning_counterfactual_preregistration(
+                    target_start_date="2026-07-20",
+                    target_end_date="2026-09-18",
+                    first_eligible_run_date="2026-09-21",
+                    now=datetime.fromisoformat("2026-07-17T18:00:00+09:00"),
+                )
+                sessions = stock_app._ai_staff_same_period_session_dates(
+                    "2026-07-20",
+                    "2026-09-18",
+                )
+                contract_hash = "forward-contract-hash"
+                forward_contract_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": stock_app.AI_STAFF_90_SESSION_FORWARD_AB_CONTRACT_SCHEMA,
+                            "contract_hash": contract_hash,
+                            "planned_session_dates": sessions,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                forward_ledger_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": stock_app.AI_STAFF_90_SESSION_FORWARD_AB_LEDGER_SCHEMA,
+                            "event_type": "SESSION_CAPTURED",
+                            "contract_hash": contract_hash,
+                            "session_date": "2026-07-20",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                result = _ai_staff_learning_counterfactual_due_preregistration_status(
+                    now=datetime.fromisoformat("2026-07-22T18:00:00+09:00"),
+                    ledger_summary={"causal_completed_triplet_keys": []},
+                )
+
+            monitor = result["same_period_collection_monitor"]
+            self.assertEqual("COLLECTION_GAP", monitor["status"])
+            self.assertEqual(len(sessions), monitor["expected_session_count"])
+            self.assertEqual(1, monitor["observed_session_count"])
+            self.assertEqual(2, monitor["missing_session_count"])
+            self.assertEqual(
+                ["2026-07-21", "2026-07-22"],
+                monitor["missing_session_dates"],
+            )
+            preflight = monitor["collection_preflight"]
+            self.assertEqual(
+                "capture_missing_after_close",
+                preflight["observer_evidence_status"],
+            )
+            self.assertFalse(preflight["today_capture_recorded"])
+            self.assertTrue(preflight["route_ready_is_not_capture_proof"])
+            self.assertEqual(
+                "run_current_session_forward_ab_observer",
+                preflight["required_recovery_action"],
+            )
+            self.assertEqual(
+                "/api/ai-tournament/staff-learning-90-session-forward-ab-observer?run=1",
+                preflight["manual_recovery_endpoint"],
+            )
+            self.assertIn(
+                "forward_ab_observer_capture_missing_after_close",
+                preflight["blockers"],
+            )
+            self.assertEqual("EVIDENCE_GAP", result["same_period_collection_health"])
+            self.assertFalse(monitor["live_order_allowed"])
 
     def test_public_preregistration_status_reconciles_the_entire_locked_contract(self):
         contract = {
@@ -1545,7 +1698,7 @@ class AiStaffLearningEffectTests(unittest.TestCase):
             ],
         }
         focus = {
-            "large_batch_jobs_allowed": True,
+            "large_batch_jobs_allowed": False,
             "market_priority_active": False,
             "market_open": False,
             "market_phase": "closed",
@@ -1572,6 +1725,8 @@ class AiStaffLearningEffectTests(unittest.TestCase):
 
         self.assertTrue(result["ready_to_run"])
         self.assertTrue(result["matured_preregistration_priority_active"])
+        self.assertTrue(result["matured_forward_contract_override"])
+        self.assertTrue(result["large_batch_jobs_allowed"])
         self.assertEqual("2026-07-20", result["target_start_date"])
         self.assertEqual("2026-09-18", result["target_end_date"])
         self.assertEqual(["005930", "000660"], result["target_symbols"])
@@ -1632,7 +1787,7 @@ class AiStaffLearningEffectTests(unittest.TestCase):
         self.assertEqual("DAILY_COUNTERFACTUAL_ALREADY_ATTEMPTED", result["status"])
         self.assertFalse(result["scheduled"])
         self.assertEqual("REGISTERED", result["preregistration"]["status"])
-        schedule_builder.assert_called_once_with(max_triplets=1, now=now)
+        schedule_builder.assert_called_once_with(max_triplets=2, now=now)
         preregister.assert_called_once_with(schedule, now=now)
         self.assertFalse(result["live_order_allowed"])
 
@@ -3586,6 +3741,10 @@ class AiStaffLearningEffectTests(unittest.TestCase):
         self.assertTrue(audit["reconciliation_validated"])
         self.assertTrue(audit["retraining_plan"]["required"])
         self.assertGreaterEqual(len(audit["retraining_plan"]["candidate_configs"]), 2)
+        self.assertEqual("official_sample_failed_stress_gate", audit["evidence_quality_tier"])
+        self.assertFalse(audit["promotion_gate"]["official_performance_claim_allowed"])
+        self.assertFalse(audit["promotion_gate"]["live_candidate_promotion_allowed"])
+        self.assertTrue(audit["promotion_gate"]["paper_retraining_only"])
         self.assertTrue(audit["paper_only"])
         self.assertFalse(audit["live_order_allowed"])
         self.assertFalse(audit["automatic_promotion"])
@@ -3653,6 +3812,20 @@ class AiStaffLearningEffectTests(unittest.TestCase):
         self.assertEqual(25, audit["actual_trade_sample_count"])
         self.assertEqual(4, audit["latest_strategy_evidence"]["actual_trade_sample_count"])
         self.assertFalse(audit["outcome_metrics_used_for_selection"])
+        self.assertEqual(
+            "historical_anchor_only_latest_unproven",
+            audit["evidence_quality_tier"],
+        )
+        self.assertTrue(audit["evidence_quality"]["historical_anchor_used"])
+        self.assertTrue(audit["evidence_quality"]["selected_official_sample_ready"])
+        self.assertFalse(audit["evidence_quality"]["latest_strategy_official_sample_ready"])
+        self.assertIn(
+            "latest_strategy_evidence_not_yet_official",
+            audit["evidence_quality"]["quality_reasons"],
+        )
+        self.assertFalse(audit["promotion_gate"]["official_performance_claim_allowed"])
+        self.assertFalse(audit["promotion_gate"]["live_candidate_promotion_allowed"])
+        self.assertTrue(audit["promotion_gate"]["paper_retraining_only"])
         self.assertEqual("paper_retraining_required", audit["status"])
         self.assertIn("latest_strategy_monte_carlo_evidence_insufficient", audit["blockers"])
         self.assertFalse(audit["passed"])
@@ -4451,6 +4624,16 @@ class AiStaffLearningEffectTests(unittest.TestCase):
                     "app.stock_suite_app._find_ai_staff_learning_counterfactual_preregistration",
                     return_value=source_lookup,
                 ),
+                patch.object(
+                    stock_app.AI_DAEMON,
+                    "status",
+                    return_value={"running": True, "thread_alive": True},
+                ),
+                patch.object(
+                    stock_app.AUTOPILOT_SCHEDULER,
+                    "status",
+                    return_value={"running": False, "thread_alive": False},
+                ),
             ):
                 first = stock_app.ensure_ai_staff_90_session_forward_ab_contract(
                     now=now,
@@ -4461,8 +4644,41 @@ class AiStaffLearningEffectTests(unittest.TestCase):
                     external_timestamp_evidence=timestamp_evidence,
                 )
                 status = stock_app.build_ai_staff_90_session_forward_ab_status(now=now)
+                overdue_before_capture = stock_app.build_ai_staff_90_session_forward_ab_status(
+                    now=datetime.fromisoformat("2026-07-20T16:00:00+09:00")
+                )
                 contract = json.loads(contract_path.read_text(encoding="utf-8"))
                 ledger = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[0])
+                focus = {
+                    "mode": "DAILY_REVIEW_FOCUS",
+                    "market_open": False,
+                    "market_priority_active": False,
+                    "market_closed_day": False,
+                }
+                with patch(
+                    "app.stock_suite_app._build_official_external_timestamp_evidence",
+                    return_value=timestamp_evidence,
+                ):
+                    captured = stock_app.run_ai_staff_90_session_forward_ab_observer_tick(
+                        result={"status": "no_due_candidate", "results": []},
+                        now=datetime.fromisoformat("2026-07-20T16:00:00+09:00"),
+                        operating_focus=focus,
+                    )
+                    duplicate = stock_app.run_ai_staff_90_session_forward_ab_observer_tick(
+                        result={"status": "no_due_candidate", "results": []},
+                        now=datetime.fromisoformat("2026-07-20T16:05:00+09:00"),
+                        operating_focus=focus,
+                    )
+                captured_status = stock_app.build_ai_staff_90_session_forward_ab_status(
+                    now=datetime.fromisoformat("2026-07-21T09:00:00+09:00")
+                )
+                ledger_path.write_text(
+                    json.dumps(ledger, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                missed_status = stock_app.build_ai_staff_90_session_forward_ab_status(
+                    now=datetime.fromisoformat("2026-07-21T09:00:00+09:00")
+                )
 
         self.assertTrue(first["ok"])
         self.assertTrue(first["created"])
@@ -4470,6 +4686,14 @@ class AiStaffLearningEffectTests(unittest.TestCase):
         self.assertEqual("FROZEN_FORWARD_PAPER_RUNNING", status["status"])
         self.assertEqual(90, status["required_trading_sessions"])
         self.assertEqual(0, status["completed_trading_sessions"])
+        self.assertTrue(status["collection_route_ready"])
+        self.assertTrue(status["collection_preflight"]["preflight_ok"])
+        self.assertEqual("OVERDUE_TODAY", overdue_before_capture["collection_health"])
+        self.assertTrue(overdue_before_capture["current_session_observation_overdue"])
+        self.assertIn(
+            "forward_ab_required_session_evidence_overdue_today",
+            overdue_before_capture["evidence_blockers"],
+        )
         self.assertEqual(90, len(contract["planned_session_dates"]))
         self.assertEqual("2026-07-20", contract["target_start_date"])
         self.assertEqual(1, len(contract["strategy_pairs"]))
@@ -4477,7 +4701,209 @@ class AiStaffLearningEffectTests(unittest.TestCase):
         self.assertRegex(contract["contract_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual("CONTRACT_FROZEN", ledger["event_type"])
         self.assertRegex(ledger["ledger_hash"], r"^[0-9a-f]{64}$")
+        self.assertTrue(captured["recorded"])
+        self.assertEqual("independent_daily_forward_ab_observer", captured["collector"])
+        self.assertTrue(captured["scheduler_independent_of_candidate_creation"])
+        self.assertFalse(duplicate["recorded"])
+        self.assertEqual("ALREADY_CAPTURED", duplicate["status"])
+        self.assertEqual(1, captured_status["completed_trading_sessions"])
+        self.assertEqual([], captured_status["missed_required_observation_dates"])
+        self.assertEqual("DUE_TODAY", captured_status["collection_health"])
+        self.assertTrue(captured_status["current_session_observation_due"])
+        self.assertTrue(missed_status["ok"])
+        self.assertEqual(
+            "EVIDENCE_GAP_QUARANTINED_CONTINUING_COLLECTION",
+            missed_status["status"],
+        )
+        self.assertEqual(["2026-07-20"], missed_status["missed_required_observation_dates"])
+        self.assertIn(
+            "forward_ab_required_session_evidence_missing",
+            missed_status["evidence_blockers"],
+        )
         self.assertFalse(status["live_order_allowed"])
+
+    def test_90_session_forward_ab_preflight_blocks_overdue_when_collectors_are_down(self):
+        source_contract = {
+            "contract_id": "LCFPR-source",
+            "contract_hash": "a" * 64,
+            "target_start_date": "2026-07-20",
+            "target_end_date": "2026-09-18",
+            "plans": [
+                {
+                    "contestant_id": "self",
+                    "source_strategy": {"strategy_generation_id": "baseline-v1"},
+                    "candidate_strategies": [{"strategy_generation_id": "improved-v2"}],
+                    "learning_transition": {"transition_hash": "b" * 64},
+                }
+            ],
+        }
+        timestamp_evidence = {
+            "schema": "codexstock_official_external_timestamp_evidence_v1",
+            "status": "VERIFIED",
+            "captured_at": "2026-07-18T07:00:00+00:00",
+            "required_source_count": 2,
+            "verified_source_count": 2,
+            "source_spread_seconds": 1.0,
+            "sources": [{"source_id": "kis_openapi"}, {"source_id": "krx_global"}],
+        }
+        timestamp_evidence["evidence_sha256"] = stock_app._hash_without_fields(
+            timestamp_evidence,
+            "evidence_sha256",
+        )
+        source_lookup = {"found": True, "valid": True, "contract": source_contract}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(
+                    stock_app,
+                    "AI_STAFF_90_SESSION_FORWARD_AB_CONTRACT_FILE",
+                    root / "forward-ab.json",
+                ),
+                patch.object(
+                    stock_app,
+                    "AI_STAFF_90_SESSION_FORWARD_AB_LEDGER_FILE",
+                    root / "forward-ab.jsonl",
+                ),
+                patch(
+                    "app.stock_suite_app.build_ai_staff_learning_counterfactual_preregistration_status",
+                    return_value={"valid": True, "hash_valid": True},
+                ),
+                patch(
+                    "app.stock_suite_app._find_ai_staff_learning_counterfactual_preregistration",
+                    return_value=source_lookup,
+                ),
+                patch.object(
+                    stock_app.AI_DAEMON,
+                    "status",
+                    return_value={"running": False, "thread_alive": False},
+                ),
+                patch.object(
+                    stock_app.AUTOPILOT_SCHEDULER,
+                    "status",
+                    return_value={"running": False, "thread_alive": False},
+                ),
+            ):
+                stock_app.ensure_ai_staff_90_session_forward_ab_contract(
+                    now=datetime.fromisoformat("2026-07-18T16:00:00+09:00"),
+                    external_timestamp_evidence=timestamp_evidence,
+                )
+                status = stock_app.build_ai_staff_90_session_forward_ab_status(
+                    now=datetime.fromisoformat("2026-07-20T16:00:00+09:00")
+                )
+
+        self.assertFalse(status["collection_route_ready"])
+        self.assertEqual("COLLECTOR_DOWN_OVERDUE", status["collection_health"])
+        self.assertFalse(status["collection_preflight"]["preflight_ok"])
+        self.assertIn(
+            "forward_ab_collection_route_not_running",
+            status["evidence_blockers"],
+        )
+
+    def test_90_session_forward_ab_flags_final_evaluation_due_on_first_eligible_date(self):
+        source_contract = {
+            "contract_id": "LCFPR-source",
+            "contract_hash": "a" * 64,
+            "target_start_date": "2026-07-20",
+            "target_end_date": "2026-09-18",
+            "plans": [
+                {
+                    "contestant_id": "self",
+                    "source_strategy": {"strategy_generation_id": "baseline-v1"},
+                    "candidate_strategies": [{"strategy_generation_id": "improved-v2"}],
+                    "learning_transition": {"transition_hash": "b" * 64},
+                }
+            ],
+        }
+        timestamp_evidence = {
+            "schema": "codexstock_official_external_timestamp_evidence_v1",
+            "status": "VERIFIED",
+            "captured_at": "2026-07-18T07:00:00+00:00",
+            "required_source_count": 2,
+            "verified_source_count": 2,
+            "source_spread_seconds": 1.0,
+            "sources": [{"source_id": "kis_openapi"}, {"source_id": "krx_global"}],
+        }
+        timestamp_evidence["evidence_sha256"] = stock_app._hash_without_fields(
+            timestamp_evidence,
+            "evidence_sha256",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            contract_path = root / "forward-ab.json"
+            ledger_path = root / "forward-ab.jsonl"
+            with (
+                patch.object(
+                    stock_app,
+                    "AI_STAFF_90_SESSION_FORWARD_AB_CONTRACT_FILE",
+                    contract_path,
+                ),
+                patch.object(
+                    stock_app,
+                    "AI_STAFF_90_SESSION_FORWARD_AB_LEDGER_FILE",
+                    ledger_path,
+                ),
+                patch(
+                    "app.stock_suite_app.build_ai_staff_learning_counterfactual_preregistration_status",
+                    return_value={"valid": True, "hash_valid": True},
+                ),
+                patch(
+                    "app.stock_suite_app._find_ai_staff_learning_counterfactual_preregistration",
+                    return_value={"found": True, "valid": True, "contract": source_contract},
+                ),
+                patch.object(
+                    stock_app.AI_DAEMON,
+                    "status",
+                    return_value={"running": True, "thread_alive": True},
+                ),
+                patch.object(
+                    stock_app.AUTOPILOT_SCHEDULER,
+                    "status",
+                    return_value={"running": True, "thread_alive": True},
+                ),
+            ):
+                stock_app.ensure_ai_staff_90_session_forward_ab_contract(
+                    now=datetime.fromisoformat("2026-07-18T16:00:00+09:00"),
+                    external_timestamp_evidence=timestamp_evidence,
+                )
+                contract = json.loads(contract_path.read_text(encoding="utf-8"))
+                rows = [
+                    json.loads(line)
+                    for line in ledger_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                previous_hash = rows[-1]["ledger_hash"]
+                for sequence, session_date in enumerate(contract["planned_session_dates"], start=1):
+                    row = {
+                        "schema": stock_app.AI_STAFF_90_SESSION_FORWARD_AB_LEDGER_SCHEMA,
+                        "event_type": "SESSION_CAPTURED",
+                        "sequence": sequence,
+                        "observed_at": f"{session_date}T15:40:00+09:00",
+                        "session_date": session_date,
+                        "contract_id": contract["contract_id"],
+                        "contract_hash": contract["contract_hash"],
+                        "external_timestamp_evidence": timestamp_evidence,
+                        "market_input_witness_sha256": "c" * 64,
+                        "strategy_pairs_digest": contract["strategy_pairs_digest"],
+                        "evaluation_status": "LOCKED_INPUT_CAPTURED_PENDING_FINAL_PAPER_REPLAY",
+                        "previous_ledger_hash": previous_hash,
+                        "paper_only": True,
+                        "live_order_allowed": False,
+                    }
+                    row["ledger_hash"] = stock_app._ai_staff_90_session_forward_ab_ledger_hash(row)
+                    previous_hash = row["ledger_hash"]
+                    stock_app._append_jsonl(ledger_path, row)
+                status = stock_app.build_ai_staff_90_session_forward_ab_status(
+                    now=datetime.fromisoformat(
+                        f"{contract['first_eligible_evaluation_date']}T18:00:00+09:00"
+                    )
+                )
+
+        self.assertEqual(90, status["completed_trading_sessions"])
+        self.assertEqual("COMPLETED_PENDING_FINAL_AB_EVALUATION", status["status"])
+        self.assertEqual("FINAL_AB_EVALUATION_DUE", status["final_ab_evaluation_status"])
+        self.assertTrue(status["final_ab_evaluation_due"])
+        self.assertTrue(status["automatic_final_ab_evaluation_required"])
+        self.assertIn("forward_ab_final_evaluation_due", status["evidence_blockers"])
 
 
 if __name__ == "__main__":

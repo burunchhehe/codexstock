@@ -301,6 +301,10 @@ class TradeReconciliationTests(unittest.TestCase):
                 return_value=audit,
             ) as completion_audit,
             patch(
+                "app.stock_suite_app._sync_historical_replay_completion_milestone",
+                return_value={"ok": True, "status": "final_milestone_already_verified"},
+            ) as milestone_sync,
+            patch(
                 "app.stock_suite_app.persist_historical_replay_completion_certificate",
                 return_value=persisted,
             ) as persist,
@@ -308,11 +312,99 @@ class TradeReconciliationTests(unittest.TestCase):
             result = stock_app.refresh_historical_replay_completion_certificate()
 
         completion_audit.assert_called_once_with()
+        milestone_sync.assert_called_once_with(audit)
         persist.assert_called_once_with(audit)
         self.assertTrue(result["ok"])
         self.assertTrue(result["audit_snapshot_reused"])
         self.assertTrue(result["paper_only"])
         self.assertFalse(result["live_order_allowed"])
+
+    def test_completion_refresh_can_persist_final_milestone_from_same_full_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            campaign_path = root / "campaign.json"
+            milestone_path = root / "milestones.jsonl"
+            campaign_ids = ["HREPLAY-A", "HREPLAY-B"]
+            campaign_scope_hash = stock_app.evidence_scope_hash(campaign_ids)
+            campaign_path.write_text(
+                json.dumps(
+                    {
+                        "campaign_id": "campaign-final",
+                        "target_count": 2,
+                        "source_replay_ids": campaign_ids,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            evidence = {
+                "ok": True,
+                "deep": True,
+                "resolved_count": 2,
+                "verified_count": 2,
+                "quarantined_count": 0,
+                "failed_count": 0,
+                "issue_count": 0,
+                "audited_journal_count": 2,
+                "audited_closed_trade_count": 4,
+                "audited_source_ids": campaign_ids,
+                "audited_scope_hash": campaign_scope_hash,
+                "artifact_hash_contract": stock_app.REPLAY_ARTIFACT_HASH_CONTRACT,
+                "artifact_anchor_required_count": 2,
+                "artifact_anchor_verified_count": 2,
+                "artifact_anchor_mismatch_count": 0,
+                "artifact_anchor_deep_verified": True,
+                "ledger_evidence_hash": "a" * 64,
+                "journal_evidence_hash": "b" * 64,
+                "replay_evidence_hash": "c" * 64,
+                "evidence_bundle_hash_contract": stock_app.EVIDENCE_BUNDLE_HASH_CONTRACT,
+            }
+            evidence["evidence_bundle_hash"] = stock_app.replay_evidence_bundle_hash(
+                audited_scope_hash=campaign_scope_hash,
+                evidence_schema_version=stock_app.HISTORICAL_REPLAY_EVIDENCE_SCHEMA_VERSION,
+                execution_timing_model_version=stock_app.HISTORICAL_REPLAY_EXECUTION_TIMING_MODEL_VERSION,
+                replay_data_bundle_evidence_schema=stock_app.HISTORICAL_REPLAY_DATA_BUNDLE_SLICE_EVIDENCE_SCHEMA,
+                artifact_hash_contract=stock_app.REPLAY_ARTIFACT_HASH_CONTRACT,
+                ledger_evidence_hash=evidence["ledger_evidence_hash"],
+                journal_evidence_hash=evidence["journal_evidence_hash"],
+                replay_evidence_hash=evidence["replay_evidence_hash"],
+            )
+            status = {
+                "campaign_id": "campaign-final",
+                "target_count": 2,
+                "campaign_scope_hash": campaign_scope_hash,
+                "resolved_count": 2,
+                "passed_milestones": [],
+            }
+            refreshed = {**status, "passed_milestones": [2]}
+            audit = {
+                "ok": True,
+                "completion_verified": True,
+                "certificate_allowed": True,
+                "evidence_audit": evidence,
+            }
+            with (
+                patch(
+                    "app.stock_suite_app.HISTORICAL_REPLAY_REGENERATION_CAMPAIGN_FILE",
+                    campaign_path,
+                ),
+                patch(
+                    "app.stock_suite_app.HISTORICAL_REPLAY_EVIDENCE_MILESTONE_FILE",
+                    milestone_path,
+                ),
+                patch(
+                    "app.stock_suite_app.historical_replay_evidence_milestone_status",
+                    side_effect=[status, refreshed],
+                ),
+            ):
+                result = stock_app._sync_historical_replay_completion_milestone(audit)
+
+            record = json.loads(milestone_path.read_text(encoding="utf-8"))
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["final_milestone_persisted"])
+            self.assertEqual(2, result["milestone"])
+            self.assertEqual("passed", record["status"])
+            self.assertEqual(campaign_scope_hash, record["audited_scope_hash"])
+            self.assertFalse(record["live_order_allowed"])
 
     def test_incomplete_audit_cannot_create_completion_certificate(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4249,7 +4341,7 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertEqual(0, result["ui_button_unbound_count"])
         self.assertGreaterEqual(result["ui_api_call_count"], 100)
         self.assertEqual(0, result["ui_api_missing_count"])
-        self.assertEqual(161, result["mcp_tool_count"])
+        self.assertEqual(170, result["mcp_tool_count"])
         self.assertEqual(result["mcp_tool_count"], result["mcp_tool_handled_count"])
         self.assertEqual(0, result["mcp_tool_unhandled_count"])
         self.assertTrue(coverage["ok"])

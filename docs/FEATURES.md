@@ -122,3 +122,36 @@ This repository is intended to show:
 - research-engine integration
 
 It is not intended to show private trading performance, account value, live broker history, or the owner's personal trading journal.
+
+## 10. Internal Developer and Recovery
+
+CodexStock now includes an independent, fail-closed operational sidecar:
+
+- one-minute heartbeat and bounded read-only diagnostics
+- busy/progress detection so long-running work is not mistaken for a frozen app
+- deterministic incident classification and severity
+- atomic JSON incident, report, advice, event, and playbook ledgers
+- single-instance scheduling and overlap prevention
+- registered cache refresh, external-engine reconnect, research retry, and ledger rebuild handlers
+- read-only SQLite lock detection
+- verified restart-request handoff to the independent watchdog
+- Telegram incident reporting through the existing reporting queue
+- launcher health dock with persisted drag position and incident history
+- GPT/MCP report reading and external-guidance intake
+- quarantine for unknown, malformed, or dangerous actions
+- mandatory post-action verification before a recovery is recorded
+
+The automatic-recovery boundary excludes live orders, API key changes, code patches, security changes, risk-limit relaxation, process killing, and database lock-file deletion.
+
+## 11. Local Model Runtime Recovery
+
+The local AI path has a bounded recovery helper for Ollama:
+
+- local loopback endpoints only
+- installed executable discovery
+- hidden startup with a cooldown to avoid restart storms
+- readiness polling before model generation
+- optional CPU backend fallback when the detected GPU runtime is incompatible
+- deterministic status queries bypass the model entirely when a model response is unnecessary
+
+This improves availability without giving model output authority over operational safety or trading policy.
