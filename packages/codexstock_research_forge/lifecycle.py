@@ -23,7 +23,13 @@ class ResearchLifecycle:
         self.root = root; self.log_path = root / "decisions.jsonl"; self.cards_root = root / "cards"
         root.mkdir(parents=True, exist_ok=True); self.cards_root.mkdir(parents=True, exist_ok=True)
 
-    def readiness(self, record: ExperimentRecord, report_verification: dict[str, Any]) -> dict[str, Any]:
+    def readiness(
+        self,
+        record: ExperimentRecord,
+        report_verification: dict[str, Any],
+        supplemental_checks: list[dict[str, Any]] | None = None,
+        supplemental_evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         strict = record.validation.get("strict_walk_forward") if isinstance(record.validation.get("strict_walk_forward"), dict) else {}
         robustness = record.validation.get("parameter_robustness") if isinstance(record.validation.get("parameter_robustness"), dict) else {}
         attribution = record.result.get("benchmark_attribution") if isinstance(record.result.get("benchmark_attribution"), dict) else {}
@@ -50,19 +56,39 @@ class ResearchLifecycle:
             {"id": "maximum_drawdown_within_50pct", "ok": max_drawdown > -50},
             {"id": "no_catastrophic_regime_loss", "ok": bool(regime_rows) and min(float(row.get("strategy_compounded_return_pct") or 0) for row in regime_rows) > -80},
         ]
+        checks.extend(
+            {"id": str(row.get("id") or ""), "ok": row.get("ok") is True}
+            for row in (supplemental_checks or [])
+            if isinstance(row, dict) and str(row.get("id") or "")
+        )
         blockers = [row["id"] for row in checks if not row["ok"]]
-        return {"eligible_for_manual_paper_nomination": not blockers, "automatic_promotion": False, "execution_mode": mode, "checks": checks, "blockers": blockers, "report_verification": report_verification}
+        return {
+            "eligible_for_manual_paper_nomination": not blockers,
+            "automatic_promotion": False,
+            "execution_mode": mode,
+            "checks": checks,
+            "blockers": blockers,
+            "report_verification": report_verification,
+            "integrated_evidence": dict(supplemental_evidence or {}),
+        }
 
     def review(
         self, record: ExperimentRecord, action: str, reviewer: str, rationale: str,
         report_verification: dict[str, Any], confirmation: str = "",
+        supplemental_checks: list[dict[str, Any]] | None = None,
+        supplemental_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         action = action.upper(); reviewer = reviewer.strip(); rationale = rationale.strip()
         if action not in {"NOMINATE_PAPER", "REJECT", "NEEDS_MORE_DATA", "ARCHIVE"}: raise ValueError("unsupported research review action")
         if not reviewer or len(reviewer) > 100 or not rationale or len(rationale) > 2000: raise ValueError("reviewer and rationale are required")
         before = record.status
         if before in {ExperimentStatus.BACKTESTING}: raise ValueError("cannot review an experiment while backtesting")
-        readiness = self.readiness(record, report_verification)
+        readiness = self.readiness(
+            record,
+            report_verification,
+            supplemental_checks=supplemental_checks,
+            supplemental_evidence=supplemental_evidence,
+        )
         if action == "NOMINATE_PAPER":
             if before != ExperimentStatus.VALIDATION: raise ValueError("only VALIDATION experiments can be nominated")
             if not readiness["eligible_for_manual_paper_nomination"]: raise ValueError("paper nomination blockers: " + ", ".join(readiness["blockers"]))
@@ -79,6 +105,54 @@ class ResearchLifecycle:
             after = ExperimentStatus.ARCHIVED
         record.status = after; record.updated_at = datetime.now(timezone.utc).isoformat()
         decision = {"schema_version": 1, "decision_id": f"decision_{uuid4().hex}", "experiment_id": record.id, "action": action, "before_status": before.value, "after_status": after.value, "reviewer": reviewer, "rationale": rationale, "manual_confirmation": action == "NOMINATE_PAPER", "readiness": readiness, "live_order_allowed": False, "created_at": datetime.now(timezone.utc).isoformat()}
+        return self._append(decision)
+
+    def auto_nominate_verified_paper(
+        self,
+        record: ExperimentRecord,
+        report_verification: dict[str, Any],
+        *,
+        scheduler_id: str,
+        rationale: str,
+        supplemental_checks: list[dict[str, Any]] | None = None,
+        supplemental_evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Nominate a fully verified experiment for Paper evidence without granting live authority."""
+        scheduler_id = scheduler_id.strip()
+        rationale = rationale.strip()
+        if not scheduler_id or len(scheduler_id) > 100 or not rationale or len(rationale) > 2000:
+            raise ValueError("scheduler_id and rationale are required")
+        if record.status != ExperimentStatus.VALIDATION:
+            raise ValueError("only VALIDATION experiments can be auto-nominated")
+        readiness = self.readiness(
+            record,
+            report_verification,
+            supplemental_checks=supplemental_checks,
+            supplemental_evidence=supplemental_evidence,
+        )
+        if not readiness["eligible_for_manual_paper_nomination"]:
+            raise ValueError("paper nomination blockers: " + ", ".join(readiness["blockers"]))
+
+        before = record.status
+        record.status = ExperimentStatus.PAPER_CANDIDATE
+        record.updated_at = datetime.now(timezone.utc).isoformat()
+        decision = {
+            "schema_version": 1,
+            "decision_id": f"decision_{uuid4().hex}",
+            "experiment_id": record.id,
+            "action": "AUTO_NOMINATE_VERIFIED_PAPER",
+            "before_status": before.value,
+            "after_status": record.status.value,
+            "reviewer": scheduler_id,
+            "rationale": rationale,
+            "manual_confirmation": False,
+            "nomination_mode": "automatic_verified_paper_only",
+            "readiness": readiness,
+            "paper_only": True,
+            "automatic_live_promotion": False,
+            "live_order_allowed": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
         return self._append(decision)
 
     def create_card(self, record: ExperimentRecord, decision: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:

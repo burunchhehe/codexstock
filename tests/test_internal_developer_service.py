@@ -10,6 +10,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from typing import Mapping
+from unittest import mock
 
 from app.internal_developer_service import (
     EXTERNAL_ENGINE_STATUS_PATH,
@@ -25,6 +26,7 @@ from app.internal_developer_service import (
     InternalDeveloperService,
     ServiceConfig,
     SingleInstanceLock,
+    _atomic_write_json,
 )
 
 
@@ -91,9 +93,13 @@ class FakeStore:
         self.incidents[incident_id] = {
             "incident_id": incident_id,
             "state": "NEW",
+            "classification": diagnostic.get("classification"),
             "diagnostic": dict(diagnostic),
         }
         return self.incidents[incident_id]
+
+    def list_incidents(self, limit: int = 100) -> list[dict[str, object]]:
+        return list(reversed(list(self.incidents.values())[-limit:]))
 
     def transition_incident(
         self,
@@ -356,6 +362,50 @@ class ServiceTestCase(unittest.TestCase):
         heartbeat = json.loads(service.heartbeat_path.read_text(encoding="utf-8"))
         self.assertEqual("healthy", heartbeat["status"])
 
+    def test_atomic_heartbeat_write_retries_transient_windows_share_denial(self) -> None:
+        target = self.data_root / "internal_developer" / "service_heartbeat.json"
+        real_replace = os.replace
+        attempts = 0
+
+        def flaky_replace(source: object, destination: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise PermissionError(5, "transient sharing violation")
+            real_replace(source, destination)
+
+        with mock.patch(
+            "app.internal_developer_service.os.replace", side_effect=flaky_replace
+        ):
+            _atomic_write_json(target, {"schema": "test", "healthy": True})
+
+        self.assertEqual(3, attempts)
+        self.assertEqual(
+            {"schema": "test", "healthy": True},
+            json.loads(target.read_text(encoding="utf-8")),
+        )
+
+    def test_sidecar_internal_error_closes_after_three_healthy_cycles(self) -> None:
+        opened = self.store.open_incident(
+            {
+                "classification": "SIDECAR_INTERNAL_ERROR",
+                "summary": "transient heartbeat write collision",
+            }
+        )
+        incident_id = str(opened["incident_id"])
+        self.store.transition_incident(incident_id, "NEEDS_EXTERNAL_ADVICE")
+        service = self.service(FakeHttp(healthy_routes()))
+
+        first = service.run_once()
+        second = service.run_once()
+        third = service.run_once()
+
+        self.assertEqual("healthy", first["status"])
+        self.assertEqual("healthy", second["status"])
+        self.assertEqual("healthy", third["status"])
+        self.assertEqual("RECOVERED_UNREVIEWED", self.store.incidents[incident_id]["state"])
+        self.assertIn(incident_id, third["reverified_transient_incidents"])
+
     def test_urgent_report_uses_existing_telegram_outbox_once_per_incident(self) -> None:
         opened = self.store.open_incident(
             {
@@ -492,8 +542,9 @@ class ServiceTestCase(unittest.TestCase):
         results = [service.run_once() for _ in range(5)]
 
         self.assertTrue(all(not row["restart_requested"] for row in results[:4]))
+        self.assertTrue(all(row["status"] == "app_unreachable_observing" for row in results[:4]))
         self.assertEqual("restart_requested", results[4]["status"])
-        self.assertEqual([False, False, False, False, True], [row[1] for row in self.engine.cycles])
+        self.assertEqual([True], [row[1] for row in self.engine.cycles])
         self.assertEqual(1, len(self.store.restart_requests))
         self.assertEqual(9876, self.store.restart_requests[0]["expected_pid"])
 
@@ -674,7 +725,8 @@ class ServiceTestCase(unittest.TestCase):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         payload = json.loads(completed.stdout)
-        self.assertEqual("app_unreachable_reported", payload["status"])
+        self.assertEqual("app_unreachable_observing", payload["status"])
+        self.assertFalse(payload["incident_opened"])
         self.assertTrue((self.root / "runtime" / "internal_developer" / "service.lock").is_file())
         self.assertFalse((self.root / "runtime" / "codexstock_restart_request.json").exists())
 
@@ -710,7 +762,7 @@ class ServiceTestCase(unittest.TestCase):
         )
         self.assertFalse(real_store.restart_request_path.exists())
 
-    def test_transient_liveness_incident_is_reverified_and_no_longer_degrades_status(self) -> None:
+    def test_single_transient_liveness_failure_does_not_open_incident(self) -> None:
         from app.internal_developer_engine import InternalDeveloperEngine
         from app.internal_developer_store import InternalDeveloperStore
 
@@ -732,27 +784,25 @@ class ServiceTestCase(unittest.TestCase):
         )
 
         first = service.run_once()
-        incident_id = str(first["incident_id"])
         second = service.run_once()
-        incident = real_store.get_incident(incident_id)
         status = real_store.status()
         report_count = len(real_store.list_reports())
         third = service.run_once()
 
-        self.assertEqual("app_unreachable_reported", first["status"])
+        self.assertEqual("app_unreachable_observing", first["status"])
+        self.assertFalse(first["incident_opened"])
         self.assertEqual("healthy", second["status"])
-        self.assertEqual([incident_id], second["reverified_transient_incidents"])
-        self.assertEqual("RECOVERED_UNREVIEWED", incident["state"])
+        self.assertEqual([], second["reverified_transient_incidents"])
         self.assertTrue(status["healthy"])
         self.assertEqual("healthy", status["operational_status"])
         self.assertEqual(0, status["open_incidents"])
-        self.assertTrue(status["attention_required"])
-        self.assertEqual(2, report_count)
+        self.assertFalse(status["attention_required"])
+        self.assertEqual(0, report_count)
         self.assertEqual([], third["reverified_transient_incidents"])
         self.assertEqual(report_count, len(real_store.list_reports()))
         self.assertFalse(real_store.restart_request_path.exists())
 
-    def test_transient_diagnostic_endpoint_incident_keeps_specific_classification_and_recovers(self) -> None:
+    def test_single_transient_diagnostic_failure_does_not_open_incident(self) -> None:
         from app.internal_developer_engine import InternalDeveloperEngine
         from app.internal_developer_store import InternalDeveloperStore
 
@@ -774,15 +824,12 @@ class ServiceTestCase(unittest.TestCase):
         )
 
         first = service.run_once()
-        incident_id = str(first["incident_id"])
-        incident_before = real_store.get_incident(incident_id)
         second = service.run_once()
-        incident_after = real_store.get_incident(incident_id)
 
-        self.assertEqual("diagnostic_endpoint_reported", first["status"])
-        self.assertEqual("DIAGNOSTIC_ENDPOINT_UNAVAILABLE", incident_before["classification"])
-        self.assertEqual([incident_id], second["reverified_transient_incidents"])
-        self.assertEqual("RECOVERED_UNREVIEWED", incident_after["state"])
+        self.assertEqual("diagnostic_endpoint_observing", first["status"])
+        self.assertFalse(first["incident_opened"])
+        self.assertEqual([], second["reverified_transient_incidents"])
+        self.assertEqual([], real_store.list_incidents())
         self.assertEqual(0, real_store.status()["open_incidents"])
         self.assertFalse(real_store.restart_request_path.exists())
 
@@ -1196,6 +1243,143 @@ class ServiceTestCase(unittest.TestCase):
         self.assertTrue(stored_advice["application_result"]["success"])
         self.assertFalse(stored_advice["application_result"]["recovered"])
         self.assertFalse(real_store.restart_request_path.exists())
+
+    def test_gpt_report_only_guidance_closes_verified_informational_drill(self) -> None:
+        from app.internal_developer_engine import InternalDeveloperEngine
+        from app.internal_developer_store import InternalDeveloperStore
+
+        real_store = InternalDeveloperStore(self.root, data_root=self.data_root)
+        real_engine = InternalDeveloperEngine(real_store, max_attempts=1, cooldown_seconds=0)
+        incident = real_store.open_incident(
+            {
+                "classification": "UNKNOWN",
+                "component": "drill-simulator",
+                "summary": "Synthetic GPT round-trip drill.",
+                "drill": True,
+                "actual_failure": False,
+            }
+        )
+        incident_id = str(incident["incident_id"])
+        real_store.transition_incident(incident_id, "NEEDS_EXTERNAL_ADVICE")
+        advice = real_store.submit_advice(
+            {
+                "incident_id": incident_id,
+                "summary": "Record the completed communication drill.",
+                "proposed_actions": [
+                    {
+                        "action": "WRITE_INCIDENT_REPORT",
+                        "parameters": {"report_type": "diagnostic"},
+                    }
+                ],
+            }
+        )
+        service = InternalDeveloperService(
+            repo_root=self.root,
+            data_root=self.data_root,
+            store=real_store,
+            engine=real_engine,
+            http_client=FakeHttp(healthy_routes()),
+            config=ServiceConfig(expected_pid=4321),
+            clock=self.clock,
+        )
+
+        result = service.run_once()
+        stored_advice = real_store.get_advice(str(advice["advice_id"]))
+        stored_incident = real_store.get_incident(incident_id)
+
+        self.assertEqual("recovered_from_external_guidance", result["status"])
+        self.assertEqual("CLOSED", stored_incident["state"])
+        self.assertEqual("ACCEPTED_AS_GUIDANCE", stored_advice["status"])
+        self.assertTrue(
+            stored_advice["application_result"]["informational_drill_completed"]
+        )
+        self.assertEqual(0, real_store.status()["drill_open_incidents"])
+
+    def test_service_reconciles_legacy_verified_report_only_drill(self) -> None:
+        from app.internal_developer_engine import InternalDeveloperEngine
+        from app.internal_developer_store import InternalDeveloperStore
+
+        real_store = InternalDeveloperStore(self.root, data_root=self.data_root)
+        real_engine = InternalDeveloperEngine(real_store, max_attempts=1, cooldown_seconds=0)
+        incident = real_store.open_incident(
+            {
+                "classification": "UNKNOWN",
+                "component": "drill-simulator-v2",
+                "summary": "Legacy completed drill.",
+                "drill": True,
+                "actual_failure": False,
+            }
+        )
+        incident_id = str(incident["incident_id"])
+        real_store.transition_incident(incident_id, "NEEDS_EXTERNAL_ADVICE")
+        advice = real_store.submit_advice(
+            {
+                "incident_id": incident_id,
+                "summary": "Verified report-only guidance.",
+                "proposed_actions": [
+                    {
+                        "action": "WRITE_INCIDENT_REPORT",
+                        "parameters": {"report_type": "diagnostic"},
+                    }
+                ],
+            }
+        )
+        real_store.transition_incident(incident_id, "AUTO_RECOVERING")
+        real_store.record_recovery_attempt(
+            incident_id,
+            {
+                "action": "WRITE_INCIDENT_REPORT",
+                "status": "succeeded",
+                "post_verification": {"ok": True, "store_acknowledged": True},
+            },
+        )
+        real_store.transition_incident(incident_id, "NEEDS_CODE_FIX")
+        real_store.update_advice(
+            str(advice["advice_id"]),
+            {"status": "ACCEPTED_AS_GUIDANCE"},
+        )
+        service = InternalDeveloperService(
+            repo_root=self.root,
+            data_root=self.data_root,
+            store=real_store,
+            engine=real_engine,
+            http_client=FakeHttp(healthy_routes()),
+            config=ServiceConfig(expected_pid=4321),
+            clock=self.clock,
+        )
+
+        closed = service._reconcile_completed_informational_drills()
+
+        self.assertEqual([incident_id], closed)
+        self.assertEqual("CLOSED", real_store.get_incident(incident_id)["state"])
+        self.assertEqual(0, real_store.status()["drill_open_incidents"])
+
+    def test_pipeline_incident_auto_closes_only_after_three_healthy_proofs(self) -> None:
+        incident = self.store.open_incident(
+            {"classification": "LEGACY_APPROVAL_GATE_ACTIVE"}
+        )
+        self.store.transition_incident(str(incident["incident_id"]), "NEEDS_CODE_FIX")
+        service = self.service(FakeHttp(healthy_routes()))
+        pipeline = {
+            "trading_pipeline_healthy": True,
+            "state": "connected",
+            "execution_mode_contract": {"mode_consistent": True},
+            "stage_counts": {
+                "candidate_tickets": 4,
+                "signed_signal_published": 4,
+                "executor_processed": 4,
+                "executor_results": 4,
+            },
+            "pending_handoff_count": 0,
+            "incidents": [],
+        }
+
+        self.assertEqual([], service._reconcile_recovered_pipeline_incidents(pipeline))
+        self.assertEqual([], service._reconcile_recovered_pipeline_incidents(pipeline))
+        closed = service._reconcile_recovered_pipeline_incidents(pipeline)
+
+        self.assertEqual([incident["incident_id"]], closed)
+        self.assertEqual("CLOSED", self.store.get_incident(str(incident["incident_id"]))["state"])
 
 
 if __name__ == "__main__":

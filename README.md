@@ -6,6 +6,36 @@ It combines market monitoring, candidate discovery, strategy research, paper/liv
 
 Created and maintained by **Jinwoo Kim** (`burunchhehe`).
 
+## 2026-07-22 지식 큐레이터·안드로이드 앱 업데이트
+
+오늘 오전에는 누적되는 회의·연구·복기·후보 판단을 정리하고 다시 찾아주는 **지식 큐레이터**를 만들었고, 저녁에는 집 PC의 코덱스스톡을 개인 안드로이드 기기에서 확인하는 **모바일 콘솔**을 실제로 연결했습니다.
+
+### 오전: 지식 큐레이터
+
+- AI 회의, 학습 통찰, 조건검색, 장후 복기, 외부신호 검증, 후보 판단, 전략 연구를 읽기 전용으로 색인합니다.
+- 원본 경로·위치·발생시각·내용 해시를 보존하고, 변경되지 않은 자료와 중복 투영을 다시 처리하지 않습니다.
+- JSONL 원장은 마지막 읽은 위치 이후의 추가분만 처리해 상시 작업을 가볍게 유지합니다.
+- SQLite FTS5/BM25는 즉시 검색, Qdrant는 경량 유사 검색, LlamaIndex는 긴 문서 분할 검색을 담당합니다.
+- Graphiti와 Microsoft GraphRAG는 장후·휴장일 요청형 실험으로 분리했습니다.
+- 계좌·잔고·주문·체결·토큰·비밀번호·API 키 관련 테이블과 열은 색인에서 제외합니다.
+- 2026-07-22 확인 시점에 7,871개 문서와 23개 상시 소스를 색인했고 스케줄러가 정상 실행 중이었습니다.
+
+![CodexStock 지식 큐레이터 운영판](docs/images/knowledge-curator-engine-board-2026-07-22.png)
+
+### 저녁: 안드로이드 모바일 콘솔
+
+- PC 주소와 만료되는 일회용 코드로 개인 기기를 연결합니다.
+- 장기 기기 토큰은 원문이 아니라 해시만 PC에 저장하며, 기기별로 폐기할 수 있습니다.
+- 운영 상태, 업무 집중도, 자동운용·외부 실행기, 추천·관찰 후보, AI 직원, 하위엔진, 내부 개발자 사건을 모바일에서 확인합니다.
+- 비서는 읽기 전용으로 제한하고, 직접 매수·매도, 자동운용 시작, 위험 한도 완화, 인증정보 열람은 차단합니다.
+- 실제 안드로이드 기기 연결, 모바일 화면, 토큰 폐기, Android test/lint, `npm audit`, APK 서명을 검증했습니다.
+
+![CodexStock 모바일 페어링과 첫 연결](docs/images/mobile-console-pairing-2026-07-22.png)
+
+![CodexStock 모바일 운영 상태와 후보판](docs/images/mobile-console-live-2026-07-22.png)
+
+상세 구현은 [지식 큐레이터](docs/KNOWLEDGE_CURATOR.md), [모바일 콘솔](docs/MOBILE_CONSOLE.md), [2026-07-22 검증 보고서](docs/VERIFIED_UPGRADE_2026-07-22.md)에서 확인할 수 있습니다.
+
 ## 2026-07-20 검증 업데이트
 
 오늘 업데이트는 코덱스스톡의 판단부와 주문 집행부를 분리하고, 외부 연구 엔진이 실제로 왕복 실행되는지를 더 엄격하게 확인하는 데 집중했습니다.
@@ -50,6 +80,8 @@ Created and maintained by **Jinwoo Kim** (`burunchhehe`).
 | 장후 학습 | 선택·탈락·놓친 종목, 진입·청산 타이밍, 재료와 시장 흐름을 반복 복기하고 다음 개선 과제로 연결 |
 | GPT/MCP | 로컬 전체 기능을 조회·진단하는 MCP와, 민감정보·실전 주문을 제외한 공개용 읽기 전용 20개 도구 |
 | 자체 진단·복구 | 1분 심장박동, 장애 분류, Telegram 보고, 안전한 허용목록 복구, GPT 외부 자문 저장과 재검증 |
+| 지식 큐레이터 | 회의·복기·연구·후보·외부 신호를 증분 색인하고 출처·시각·해시를 보존해 AI 직원이 다시 찾도록 지원 |
+| 안드로이드 콘솔 | 개인 HTTPS 연결, 일회용 페어링, 해시 토큰, 운영 상태·후보·직원·엔진·사건 조회, 읽기 전용 비서 |
 
 ### 2026-07-19 확인 스냅샷
 
@@ -156,6 +188,8 @@ CodexStock was built around one question: how can a personal investor turn scatt
 | GPT/MCP access | Redacted local MCP tools for status, candidates, reports, and learning summaries |
 | Internal developer | Independent diagnostics, incident reports, safe recovery allowlist, GPT advice bridge, recovery verification |
 | Operational visibility | One-minute heartbeat, Telegram alerts, launcher health dock, incident/advice/report history |
+| Knowledge curator | Incremental immutable-source indexing, FTS/BM25 retrieval, optional Qdrant/LlamaIndex/graph projections |
+| Android console | Private paired-device status, candidates, staff, engines, incidents, and read-only assistant |
 | Safety | Read-only defaults, explicit live-trading gates, credential exclusion, runtime/source separation |
 
 See [docs/FEATURES.md](docs/FEATURES.md) for a fuller feature map.
@@ -203,6 +237,8 @@ flowchart LR
     STAFF --> RISK["Risk and approval gates"]
     APP --> FORGE["Research Forge sub-engine"]
     APP --> EXT["External engine workers"]
+    APP --> CURATOR["Read-only knowledge curator"]
+    MOBILE["Private Android console"] -->|"paired HTTPS"| APP
     DEV["Independent internal developer"] -->|"read-only diagnostics"| APP
     DEV --> INCIDENTS["Private incident and advice ledger"]
     GPT -->|"untrusted guidance through MCP"| INCIDENTS
@@ -235,7 +271,11 @@ The internal developer is not an unrestricted coding agent. Its automatic action
 | --- | --- |
 | `app/` | Local app server, integrations, MCP bridge, operational logic |
 | `app/internal_developer_*.py` | Independent storage, policy engine, and read-only recovery sidecar |
+| `app/knowledge_curator.py` | Immutable-source projection, incremental indexing, search, and specialist scheduling |
+| `app/mobile_console.py` | One-time pairing, hashed device tokens, read-only mobile command boundary |
 | `app/web/` | Browser dashboard UI |
+| `app/web/mobile/` | Mobile-first private operations console |
+| `mobile/codexstock-android/` | Capacitor Android wrapper and reproducible Gradle project |
 | `packages/stock_suite/` | Reusable stock-suite package facade |
 | `packages/codexstock_research_forge/` | Research-only validation engine |
 | `tools/` | Local verification, gateway, and worker scripts |

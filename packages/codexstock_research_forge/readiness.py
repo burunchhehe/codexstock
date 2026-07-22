@@ -27,10 +27,10 @@ def evaluate_readiness(forge: Any, external: dict[str, Any] | None = None) -> di
             if forge.verify_export(record.id).get("ok"): verified_reports.append(record.id)
         except Exception as exc: report_verification_errors.append({"experiment_id": record.id, "type": type(exc).__name__, "message": str(exc)[:500]})
     historical = [row for row in universes["datasets"] if bool((row.get("evidence") or {}).get("includes_delisted"))]
-    complete_history = [row for row in historical if bool((row.get("evidence") or {}).get("complete_daily_history")) and int((row.get("evidence") or {}).get("precoverage_listing_dates_clipped") or 0) == 0]
+    complete_history = [row for row in historical if _complete_universe_evidence(row)]
     required_hts_profiles = {"LS_HTS", "KIWOOM_HTS", "KIS"}
     hts_complete = bool(hts.get("ok")) and set(hts["profiles"]) == required_hts_profiles and all(bool(hts["profiles"][name].get("fully_verified")) for name in required_hts_profiles)
-    verified_corporate_actions = [row for row in corporate_actions["datasets"] if bool(row.get("complete_history")) and bool(row.get("source_documents_verified"))]
+    verified_corporate_actions = [row for row in corporate_actions["datasets"] if _complete_corporate_action_evidence(row)]
     completed_data_runs = [row for row in realtime.get("runs", []) if row.get("status") == "COMPLETED" and int((row.get("run") or {}).get("data_messages") or 0) > 0 and int((row.get("run") or {}).get("accepted_events") or 0) > 0 and bool((row.get("run") or {}).get("in_session_quality_ok")) and bool(row.get("stream_summaries"))]
     long_runs = qualified_full_session_runs(realtime); active_realtime = active_realtime_progress(base / "realtime")
     report_required = [record.id for record in records if bool(record.result)]; all_reports_verified = bool(report_required) and set(report_required).issubset(verified_reports)
@@ -74,6 +74,31 @@ def evaluate_readiness(forge: Any, external: dict[str, Any] | None = None) -> di
 
 def _check(identifier: str, ok: Any, detail: str) -> dict[str, Any]: return {"id": identifier, "ok": bool(ok), "detail": detail}
 def _blockers(rows: list[dict[str, Any]]) -> list[str]: return [row["id"] for row in rows if not row["ok"]]
+
+
+def _complete_universe_evidence(row: dict[str, Any]) -> bool:
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    coverage_start, coverage_end = str(evidence.get("coverage_start") or ""), str(evidence.get("coverage_end") or "")
+    try:
+        coverage_valid = bool(coverage_start and coverage_end and datetime.fromisoformat(coverage_start) <= datetime.fromisoformat(coverage_end))
+    except ValueError:
+        coverage_valid = False
+    return bool(
+        evidence.get("official") is True
+        and evidence.get("includes_delisted") is True
+        and evidence.get("complete_daily_history") is True
+        and int(evidence.get("precoverage_listing_dates_clipped") or 0) == 0
+        and str(evidence.get("grade") or "") in {"official_listing_interval_history", "complete_listing_history"}
+        and coverage_valid
+    )
+
+
+def _complete_corporate_action_evidence(row: dict[str, Any]) -> bool:
+    return bool(
+        row.get("complete_history") is True
+        and row.get("source_documents_verified") is True
+        and int(row.get("verified_source_document_count") or 0) > 0
+    )
 def _json(path: Path) -> dict[str, Any]:
     try: return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError): return {}

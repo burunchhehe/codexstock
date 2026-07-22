@@ -14,6 +14,7 @@ import math
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -101,6 +102,7 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
             "NEEDS_EXTERNAL_ADVICE",
             "NEEDS_CODE_FIX",
             "WAITING_FOR_RESTART",
+            "CLOSED",
         }
     ),
     "RECOVERY_FAILED": frozenset(
@@ -375,7 +377,14 @@ class InternalDeveloperStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            for attempt in range(40):
+                try:
+                    os.replace(temporary, path)
+                    break
+                except PermissionError:
+                    if attempt >= 39:
+                        raise
+                    time.sleep(0.05)
         finally:
             try:
                 temporary.unlink(missing_ok=True)
@@ -391,7 +400,14 @@ class InternalDeveloperStore:
                 handle.write(_redact_text(text))
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            for attempt in range(40):
+                try:
+                    os.replace(temporary, path)
+                    break
+                except PermissionError:
+                    if attempt >= 39:
+                        raise
+                    time.sleep(0.05)
         finally:
             try:
                 temporary.unlink(missing_ok=True)
@@ -487,8 +503,22 @@ class InternalDeveloperStore:
             issues = safe.get("issues") if isinstance(safe.get("issues"), list) else []
             primary = issues[0] if issues and isinstance(issues[0], dict) else {}
             fingerprint = _diagnostic_fingerprint(safe)
+            incoming_classification = str(
+                safe.get("primary_issue")
+                or safe.get("classification")
+                or safe.get("code")
+                or primary.get("issue_code")
+                or "UNKNOWN_FAILURE"
+            )[:96]
             for existing in self._records(self.incidents_dir, id_key="incident_id", prefix="INC"):
-                if existing.get("state") not in OPEN_STATES or existing.get("fingerprint") != fingerprint:
+                same_fingerprint = existing.get("fingerprint") == fingerprint
+                refines_unknown_component = bool(
+                    str(existing.get("classification") or "") == incoming_classification
+                    and str(existing.get("component") or "unknown").lower() == "unknown"
+                )
+                if existing.get("state") not in OPEN_STATES or not (
+                    same_fingerprint or refines_unknown_component
+                ):
                     continue
                 duplicate_id = _validate_id(existing.get("incident_id"), "INC")
                 history = existing.get("history") if isinstance(existing.get("history"), list) else []
@@ -509,6 +539,16 @@ class InternalDeveloperStore:
                         "history": history[-100:],
                     }
                 )
+                # A repeated observation may carry a newer, more precise
+                # diagnostic contract.  Refresh descriptive evidence without
+                # changing incident state or discarding recovery history.
+                component = str(safe.get("component") or primary.get("component") or "").strip()
+                summary = str(safe.get("summary") or primary.get("summary") or "").strip()
+                if component and component.lower() != "unknown":
+                    existing["component"] = component[:160]
+                if summary and summary != "-":
+                    existing["summary"] = _redact_text(summary)
+                existing["diagnostic"] = safe
                 self._atomic_write_json(self.incidents_dir / f"{duplicate_id}.json", existing)
                 self._record_event_unlocked(
                     "incident.deduplicated", {"incident_id": duplicate_id, "fingerprint": fingerprint}
@@ -570,6 +610,27 @@ class InternalDeveloperStore:
             current = str(record.get("state") or "")
             if target == current or target not in ALLOWED_TRANSITIONS.get(current, frozenset()):
                 raise ValueError(f"invalid incident transition: {current} -> {target}")
+            pipeline_classes = {
+                "MARKET_SCAN_STALLED",
+                "CANDIDATE_VALIDATION_STALLED",
+                "CANDIDATE_PROMOTION_STALLED",
+                "SIGNED_SIGNAL_MISSING",
+                "EXECUTOR_HANDOFF_FAILED",
+                "LEGACY_APPROVAL_GATE_ACTIVE",
+            }
+            if target == "CLOSED" and str(record.get("classification") or "").upper() in pipeline_classes:
+                closure = metadata if isinstance(metadata, dict) else {}
+                required = (
+                    "root_cause_confirmed",
+                    "reproduction_checked",
+                    "end_to_end_verified",
+                    "regression_test_passed",
+                )
+                missing = [name for name in required if closure.get(name) is not True]
+                if missing:
+                    raise ValueError(
+                        "pipeline incident closure requires verified evidence: " + ", ".join(missing)
+                    )
             now = _utc_now()
             history = record.get("history") if isinstance(record.get("history"), list) else []
             history.append(
@@ -977,10 +1038,52 @@ class InternalDeveloperStore:
         incidents = records.get("incidents", [])
         reports = records.get("reports", [])
         advice = records.get("advice", [])
-        open_incidents = [row for row in incidents if row.get("state") in OPEN_STATES]
-        recovered_unreviewed = [row for row in incidents if row.get("state") == "RECOVERED_UNREVIEWED"]
-        unreviewed_reports = [row for row in reports if row.get("review_status") != "REVIEWED"]
-        unreviewed_advice = [row for row in advice if row.get("status") in {"RECEIVED", "QUARANTINED", "UNDER_REVIEW"}]
+        incident_by_id = {str(row.get("incident_id") or ""): row for row in incidents}
+
+        def is_drill(row: dict[str, object]) -> bool:
+            diagnostic = row.get("diagnostic") if isinstance(row.get("diagnostic"), dict) else {}
+            return diagnostic.get("drill") is True or diagnostic.get("actual_failure") is False
+
+        transient_classes = {
+            "HEARTBEAT_MISSING",
+            "PROCESS_UNRESPONSIVE",
+            "DIAGNOSTIC_ENDPOINT_UNAVAILABLE",
+        }
+        all_open_incidents = [row for row in incidents if row.get("state") in OPEN_STATES]
+        drill_open_incidents = [row for row in all_open_incidents if is_drill(row)]
+        open_incidents = [row for row in all_open_incidents if not is_drill(row)]
+        all_recovered_unreviewed = [
+            row for row in incidents if row.get("state") == "RECOVERED_UNREVIEWED"
+        ]
+        informational_recovered = [
+            row
+            for row in all_recovered_unreviewed
+            if is_drill(row) or str(row.get("classification") or "").upper() in transient_classes
+        ]
+        recovered_unreviewed = [
+            row for row in all_recovered_unreviewed if row not in informational_recovered
+        ]
+        all_unreviewed_reports = [
+            row for row in reports if row.get("review_status") != "REVIEWED"
+        ]
+        actionable_incident_ids = {
+            str(row.get("incident_id") or "") for row in open_incidents + recovered_unreviewed
+        }
+        unreviewed_reports = [
+            row
+            for row in all_unreviewed_reports
+            if str(row.get("incident_id") or "") in actionable_incident_ids
+        ]
+        informational_reports = [
+            row for row in all_unreviewed_reports if row not in unreviewed_reports
+        ]
+        unreviewed_advice = [
+            row
+            for row in advice
+            if row.get("status") in {"RECEIVED", "UNDER_REVIEW"}
+            and not is_drill(incident_by_id.get(str(row.get("incident_id") or ""), {}))
+        ]
+        quarantined_advice = [row for row in advice if row.get("status") == "QUARANTINED"]
         latest_report = max(reports, key=lambda row: str(row.get("created_at") or ""), default=None)
         attention = bool(open_incidents or recovered_unreviewed or unreviewed_reports or unreviewed_advice)
         needs_external = any(
@@ -994,9 +1097,15 @@ class InternalDeveloperStore:
             "healthy": not open_incidents,
             "attention_required": attention,
             "open_incidents": len(open_incidents),
+            "drill_open_incidents": len(drill_open_incidents),
             "recovered_unreviewed_incidents": len(recovered_unreviewed),
+            "recovered_unreviewed_total": len(all_recovered_unreviewed),
+            "informational_recovered_incidents": len(informational_recovered),
             "unreviewed_reports": len(unreviewed_reports),
+            "unreviewed_reports_total": len(all_unreviewed_reports),
+            "informational_unreviewed_reports": len(informational_reports),
             "unreviewed_advice": len(unreviewed_advice),
+            "quarantined_advice": len(quarantined_advice),
             "needs_external_advice": needs_external,
             "latest_report_id": latest_report.get("report_id") if latest_report else None,
             "counts": {name: len(rows) for name, rows in records.items()},

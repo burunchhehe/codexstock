@@ -1738,6 +1738,77 @@ class AiStaffLearningEffectTests(unittest.TestCase):
         )
         self.assertFalse(result["live_order_allowed"])
 
+    def test_scheduler_reports_future_locked_contract_even_before_queue_is_runnable(self):
+        due_status = {
+            "status": "WAITING_FOR_PREREGISTERED_PERIOD",
+            "entries": [
+                {
+                    "valid": True,
+                    "state": "FUTURE_LOCKED",
+                    "contract_id": "LCFPR-future",
+                    "contract_hash": "future-hash",
+                    "target_start_date": "2026-07-20",
+                    "target_end_date": "2026-09-18",
+                    "first_eligible_run_date": "2026-09-21",
+                }
+            ],
+            "selected_due_contract": {},
+        }
+        period_plan = {
+            "ok": False,
+            "status": "waiting_for_completed_target_period",
+            "start_date": "",
+            "end_date": "",
+            "next_candidate_start_date": "2026-07-20",
+            "minimum_candidate_end_date": "2026-09-18",
+            "next_eligible_date": "2026-09-21",
+            "blockers": ["no_completed_non_overlapping_target_period_available"],
+        }
+        queue = {
+            "ok": False,
+            "safe_to_execute_paper": False,
+            "job_count": 0,
+            "strategy_triplet_count": 0,
+            "jobs": [],
+            "queue_hash": "empty-queue",
+            "preregistered_forward_test": False,
+            "learning_preregistration_found": False,
+            "learning_preregistration_valid": False,
+        }
+        focus = {
+            "large_batch_jobs_allowed": False,
+            "market_priority_active": False,
+            "market_open": False,
+            "market_phase": "closed",
+            "large_batch_schedule": "weekend",
+        }
+        with (
+            patch(
+                "app.stock_suite_app._ai_staff_learning_counterfactual_due_preregistration_status",
+                return_value=due_status,
+            ),
+            patch(
+                "app.stock_suite_app._ai_staff_learning_counterfactual_period_plan",
+                return_value=period_plan,
+            ),
+            patch(
+                "app.stock_suite_app.build_ai_staff_learning_counterfactual_queue",
+                return_value=queue,
+            ),
+            patch("app.stock_suite_app.build_operating_focus", return_value=focus),
+        ):
+            result = build_ai_staff_learning_counterfactual_scheduler_status(
+                max_triplets=1,
+                now=datetime.fromisoformat("2026-07-21T19:00:00+09:00"),
+            )
+
+        self.assertFalse(result["ready_to_run"])
+        self.assertTrue(result["preregistered_forward_test"])
+        self.assertTrue(result["learning_preregistration_found"])
+        self.assertTrue(result["learning_preregistration_valid"])
+        self.assertEqual("LCFPR-future", result["learning_preregistration_id"])
+        self.assertEqual("future-hash", result["learning_preregistration_hash"])
+
     def test_daily_execution_guard_still_checks_future_preregistration_first(self):
         now = datetime.fromisoformat("2026-07-17T20:00:00+09:00")
         runtime = {
@@ -4904,6 +4975,137 @@ class AiStaffLearningEffectTests(unittest.TestCase):
         self.assertTrue(status["final_ab_evaluation_due"])
         self.assertTrue(status["automatic_final_ab_evaluation_required"])
         self.assertIn("forward_ab_final_evaluation_due", status["evidence_blockers"])
+
+    def test_90_session_forward_ab_final_evaluation_persists_hashed_paper_result(self):
+        baseline = {
+            "strategy_generation_id": "baseline-v1",
+            "strategy": "ma_cross",
+            "fast": 10,
+            "slow": 30,
+        }
+        adapted = {
+            "strategy_generation_id": "improved-v2",
+            "strategy": "ma_cross",
+            "fast": 8,
+            "slow": 26,
+        }
+        pair = {
+            "contestant_id": "self",
+            "strategy_a_id": "baseline-v1",
+            "strategy_a_signature": stock_app._ai_staff_strategy_signature(baseline),
+            "strategy_b_id": "improved-v2",
+            "strategy_b_signature": stock_app._ai_staff_strategy_signature(adapted),
+            "learning_transition_hash": "b" * 64,
+        }
+        pair["pair_hash"] = stock_app._hash_without_fields(pair, "pair_hash")
+        contract = {
+            "contract_id": "FAB90-test",
+            "contract_hash": "a" * 64,
+            "source_target_start_date": "2026-07-20",
+            "source_target_end_date": "2026-09-18",
+            "strategy_pairs": [pair],
+            "planned_session_dates": ["2026-07-20", "2026-11-30"],
+            "planned_session_dates_sha256": "c" * 64,
+        }
+        source_contract = {
+            "symbols": ["005930"],
+            "plans": [{
+                "contestant_id": "self",
+                "display_name": "self",
+                "source_strategy": baseline,
+                "candidate_strategies": [adapted],
+                "learning_transition": {"transition_hash": "b" * 64},
+            }],
+        }
+        replay_rows = [
+            {
+                "contestant_id": "self",
+                "run_type": "same_period_baseline",
+                "status": "COMPLETED",
+                "total_return_pct": 5.0,
+                "max_drawdown_pct": 10.0,
+                "execution_comparison_contract_hash": "d" * 64,
+                "replay_data_bundle_evidence": {"slice_content_hash": "e" * 64},
+            },
+            {
+                "contestant_id": "self",
+                "run_type": "same_period_adapted",
+                "status": "COMPLETED",
+                "total_return_pct": 9.0,
+                "max_drawdown_pct": 8.0,
+                "execution_comparison_contract_hash": "d" * 64,
+                "replay_data_bundle_evidence": {"slice_content_hash": "e" * 64},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger_path = root / "forward-ab-ledger.jsonl"
+            result_path = root / "forward-ab-result.json"
+            ledger_path.write_text(
+                json.dumps({
+                    "schema": stock_app.AI_STAFF_90_SESSION_FORWARD_AB_LEDGER_SCHEMA,
+                    "event_type": "CONTRACT_FROZEN",
+                    "ledger_hash": "f" * 64,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.object(
+                    stock_app,
+                    "AI_STAFF_90_SESSION_FORWARD_AB_LEDGER_FILE",
+                    ledger_path,
+                ),
+                patch.object(
+                    stock_app,
+                    "AI_STAFF_90_SESSION_FORWARD_AB_RESULT_FILE",
+                    result_path,
+                ),
+                patch(
+                    "app.stock_suite_app.build_ai_staff_90_session_forward_ab_status",
+                    return_value={
+                        "final_ab_evaluation_complete": False,
+                        "final_ab_evaluation_due": True,
+                        "evidence_blockers": ["forward_ab_final_evaluation_due"],
+                    },
+                ),
+                patch(
+                    "app.stock_suite_app._load_ai_staff_90_session_forward_ab_contract",
+                    return_value=contract,
+                ),
+                patch(
+                    "app.stock_suite_app._find_ai_staff_learning_counterfactual_preregistration",
+                    return_value={"valid": True, "contract": source_contract},
+                ),
+                patch(
+                    "app.stock_suite_app.build_operating_focus",
+                    return_value={"market_priority_active": False, "market_open": False},
+                ),
+                patch(
+                    "app.stock_suite_app._run_ai_staff_learning_counterfactual_jobs",
+                    return_value={"rows": replay_rows},
+                ),
+            ):
+                result = stock_app.run_ai_staff_90_session_forward_ab_final_evaluation(
+                    now=datetime.fromisoformat("2026-12-01T18:00:00+09:00")
+                )
+                persisted = stock_app._load_ai_staff_90_session_forward_ab_result(
+                    contract["contract_hash"]
+                )
+                ledger_rows = [
+                    json.loads(line)
+                    for line in ledger_path.read_text(encoding="utf-8").splitlines()
+                ]
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("COMPLETED", result["status"])
+        self.assertEqual("IMPROVED", result["pair_results"][0]["verdict"])
+        self.assertEqual(5.0, result["pair_results"][0]["risk_adjusted_improvement"])
+        self.assertEqual(result["result_hash"], persisted["result_hash"])
+        self.assertTrue(result["official_learning_evidence"])
+        self.assertFalse(result["official_performance_claim_allowed"])
+        self.assertFalse(result["automatic_promotion"])
+        self.assertEqual("FINAL_AB_EVALUATION", ledger_rows[-1]["event_type"])
+        self.assertEqual(result["result_hash"], ledger_rows[-1]["result_hash"])
 
 
 if __name__ == "__main__":

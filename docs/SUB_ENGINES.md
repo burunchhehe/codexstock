@@ -23,6 +23,7 @@ Sub-engines do not receive broker secrets, account numbers, private journals, or
 | Nautilus Worker | Event-driven/backtest research | More realistic event-driven execution and microstructure-style experiments | Research-only |
 | Lean Worker | Institutional-style backtest compatibility | Strategy validation through Lean-style project workers | Research-only |
 | Backtrader/FinRL/Freqtrade/vn.py Workers | Optional specialist adapters | Tactical backtest, RL-style environment, policy testing, or contract-style gateway experiments | Optional; no live authority by default |
+| Knowledge Curator | Host-side knowledge retrieval employee | Incrementally indexes immutable meetings, reviews, research, candidates, and external-signal evidence; routes optional Qdrant, LlamaIndex, Graphiti, and GraphRAG work | Excludes account/order/credential sources and cannot alter source ledgers or submit orders |
 
 ## Why Use Sub-Engines?
 
@@ -38,6 +39,9 @@ CodexStock uses sub-engines to separate concerns:
 - OpenBB: broad market research context
 - Nautilus/Lean/Backtrader: independent backtest assumptions
 - FinRL/Freqtrade/vn.py adapters: optional specialist experimentation
+- Knowledge Curator: fast retrieval and provenance across accumulated internal evidence
+
+The Knowledge Curator itself stays lightweight through SQLite FTS and incremental indexing. Qdrant can update in small batches, while LlamaIndex, Graphiti, and GraphRAG are scheduled on demand or outside market hours. Graphiti and GraphRAG remain partial experiments and are not presented as production-complete engines.
 
 ## Host Responsibilities
 

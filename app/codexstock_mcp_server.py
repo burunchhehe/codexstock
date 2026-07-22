@@ -25,12 +25,43 @@ DEFAULT_TOOL_RESULT_MAX_CHARS = 18000
 HARD_TOOL_RESULT_MAX_CHARS = 40000
 MCP_CLIENT_EXPOSURE_RECEIPT_SCHEMA = "codexstock.mcp-client-exposure-receipt.v1"
 MCP_HTTP_CACHE_MAX_ENTRIES = 64
+MCP_CORE_TOOL_NAMES = (
+    "codexstock_mcp_manifest",
+    "codexstock_status",
+    "codexstock_ask_agent",
+    "codexstock_feature_health",
+    "codexstock_staff_status",
+    "codexstock_internal_developer_status",
+    "codexstock_internal_developer_latest_report",
+    "codexstock_internal_developer_readonly_diagnostics",
+    "codexstock_market_context_snapshot",
+    "codexstock_intraday_market_pulse",
+    "codexstock_candidate_lane_audit",
+    "codexstock_live_candidate_decisions",
+    "codexstock_live_order_blackbox",
+    "codexstock_live_reconciliation_audit",
+    "codexstock_learning_memory_audit",
+    "codexstock_staff_learning_effect_audit",
+    "codexstock_external_signal_inbox",
+    "codexstock_external_engine_status",
+    "codexstock_external_learning_report",
+    "codexstock_weakness_completion_audit",
+)
 
 _USE_HEADERS = False
 _HTTP_JSON_CACHE: dict[str, tuple[float, Any]] = {}
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
 PACKAGES_DIR = REPO_ROOT / "packages"
+MCP_SOURCE_PATH = Path(__file__).resolve()
+MCP_PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
+try:
+    _mcp_loaded_stat = MCP_SOURCE_PATH.stat()
+    MCP_SOURCE_LOADED_STAT = (_mcp_loaded_stat.st_mtime_ns, _mcp_loaded_stat.st_size)
+    MCP_SOURCE_LOADED_SHA256 = hashlib.sha256(MCP_SOURCE_PATH.read_bytes()).hexdigest()
+except OSError:
+    MCP_SOURCE_LOADED_STAT = (0, 0)
+    MCP_SOURCE_LOADED_SHA256 = ""
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 if str(PACKAGES_DIR) not in sys.path:
@@ -745,9 +776,10 @@ def _is_sensitive_key(key: object) -> bool:
 
 def _is_money_key(key: object) -> bool:
     normalized = _normalize_key(key)
-    if any(part in normalized for part in RATIO_KEY_PARTS):
+    framed = f"_{normalized}_"
+    if any(f"_{part}_" in framed for part in RATIO_KEY_PARTS):
         return False
-    return any(part in normalized for part in MONEY_KEY_PARTS)
+    return any(f"_{part}_" in framed for part in MONEY_KEY_PARTS)
 
 
 def _is_public_hash_value(key: object, value: object) -> bool:
@@ -1186,6 +1218,12 @@ def _mcp_tool_category(name: str) -> str:
         "codexstock_runtime_data_separation_audit",
     }:
         return "storage_runtime"
+    if name in {
+        "codexstock_knowledge_curator_status",
+        "codexstock_knowledge_search",
+        "codexstock_knowledge_engine_plan",
+    }:
+        return "knowledge_management"
     if (
         name.startswith("codexstock_external_")
         or "_external_" in name
@@ -1253,6 +1291,26 @@ def _read_mcp_client_exposure_receipt() -> dict[str, Any]:
     payload["client_tool_names"] = sorted(
         {str(value).strip() for value in names if str(value).strip()}
     )
+    aliases = payload.get("client_tool_aliases")
+    if not isinstance(aliases, dict):
+        aliases = {}
+    normalized_aliases = {
+        str(alias).strip(): str(canonical).strip()
+        for alias, canonical in aliases.items()
+        if str(alias).strip() and str(canonical).strip()
+    }
+    if any(alias not in payload["client_tool_names"] for alias in normalized_aliases):
+        return {}
+    payload["client_tool_aliases"] = dict(sorted(normalized_aliases.items()))
+    resolved_names = sorted(
+        {
+            normalized_aliases.get(name, name)
+            for name in payload["client_tool_names"]
+        }
+    )
+    if len(resolved_names) != len(payload["client_tool_names"]):
+        return {}
+    payload["client_resolved_tool_names"] = resolved_names
     return payload
 
 
@@ -1272,6 +1330,26 @@ def _read_mcp_stale_client_exposure_receipt() -> dict[str, Any]:
     payload["client_tool_names"] = sorted(
         {str(value).strip() for value in names if str(value).strip()}
     )
+    aliases = payload.get("client_tool_aliases")
+    if not isinstance(aliases, dict):
+        aliases = {}
+    normalized_aliases = {
+        str(alias).strip(): str(canonical).strip()
+        for alias, canonical in aliases.items()
+        if str(alias).strip() and str(canonical).strip()
+    }
+    if any(alias not in payload["client_tool_names"] for alias in normalized_aliases):
+        return {}
+    payload["client_tool_aliases"] = dict(sorted(normalized_aliases.items()))
+    resolved_names = sorted(
+        {
+            normalized_aliases.get(name, name)
+            for name in payload["client_tool_names"]
+        }
+    )
+    if len(resolved_names) != len(payload["client_tool_names"]):
+        return {}
+    payload["client_resolved_tool_names"] = resolved_names
     return payload
 
 
@@ -1312,9 +1390,40 @@ def _record_mcp_client_exposure(arguments: dict[str, Any]) -> dict[str, Any] | N
     raw_names = arguments.get("client_tool_names")
     if not isinstance(raw_names, list):
         return None
-    names = sorted({str(value).strip() for value in raw_names if str(value).strip()})
+    names: set[str] = set()
+    aliases: dict[str, str] = {}
+    for raw_value in raw_names:
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        if "=>" in value:
+            alias, canonical = (part.strip() for part in value.split("=>", 1))
+            if not alias or not canonical:
+                raise ValueError("client tool aliases must use 'visible_name=>server_name'")
+            if len(alias) > 256 or len(canonical) > 256:
+                raise ValueError("client tool alias names cannot exceed 256 characters")
+            previous = aliases.get(alias)
+            if previous and previous != canonical:
+                raise ValueError(f"conflicting client tool alias: {alias}")
+            aliases[alias] = canonical
+            names.add(alias)
+        else:
+            if len(value) > 256:
+                raise ValueError("client tool names cannot exceed 256 characters")
+            names.add(value)
+    names = sorted(names)
     if len(names) > 500:
         raise ValueError("client_tool_names cannot contain more than 500 tools")
+    server_names = {str(tool.get("name") or "").strip() for tool in TOOLS}
+    unknown_alias_targets = sorted(set(aliases.values()) - server_names)
+    if unknown_alias_targets:
+        raise ValueError(
+            "client tool alias target is not published by this server: "
+            + ", ".join(unknown_alias_targets[:5])
+        )
+    resolved_names = sorted({aliases.get(name, name) for name in names})
+    if len(resolved_names) != len(names):
+        raise ValueError("client tool aliases collapse multiple visible tools into one server tool")
     schema_sha256 = str(arguments.get("client_schema_sha256") or "").strip().lower()
     if schema_sha256 and not re.fullmatch(r"[0-9a-f]{64}", schema_sha256):
         raise ValueError("client_schema_sha256 must be a 64-character SHA-256 hex digest")
@@ -1334,8 +1443,16 @@ def _record_mcp_client_exposure(arguments: dict[str, Any]) -> dict[str, Any] | N
         or "unspecified-client",
         "client_tool_names": names,
         "client_tool_count": len(names),
+        "client_tool_aliases": dict(sorted(aliases.items())),
+        "client_tool_alias_count": len(aliases),
+        "client_resolved_tool_names": resolved_names,
         "client_tool_names_sha256": hashlib.sha256(
             json.dumps(names, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "client_resolved_tool_names_sha256": hashlib.sha256(
+            json.dumps(resolved_names, ensure_ascii=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
         ).hexdigest(),
         "client_schema_sha256": schema_sha256 or None,
         "client_observed_at": parsed_observed_at.isoformat(),
@@ -1350,6 +1467,45 @@ def _record_mcp_client_exposure(arguments: dict[str, Any]) -> dict[str, Any] | N
     )
     temporary.replace(path)
     return payload
+
+
+def _mcp_runtime_source_freshness() -> dict[str, Any]:
+    """Report whether this MCP process is executing the current source file."""
+    try:
+        current_stat = MCP_SOURCE_PATH.stat()
+        current_stat_key = (current_stat.st_mtime_ns, current_stat.st_size)
+        if current_stat_key == MCP_SOURCE_LOADED_STAT:
+            current_sha256 = MCP_SOURCE_LOADED_SHA256
+        else:
+            current_sha256 = hashlib.sha256(MCP_SOURCE_PATH.read_bytes()).hexdigest()
+        restart_required = bool(
+            not MCP_SOURCE_LOADED_SHA256
+            or current_sha256 != MCP_SOURCE_LOADED_SHA256
+        )
+        return {
+            "ok": not restart_required,
+            "status": "restart_required" if restart_required else "current",
+            "process_started_at": MCP_PROCESS_STARTED_AT,
+            "source_path": str(MCP_SOURCE_PATH),
+            "loaded_source_sha256": MCP_SOURCE_LOADED_SHA256 or None,
+            "current_source_sha256": current_sha256 or None,
+            "source_changed_since_process_start": restart_required,
+            "restart_required": restart_required,
+            "read_only": True,
+            "live_order_allowed": False,
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "status": "source_unavailable",
+            "process_started_at": MCP_PROCESS_STARTED_AT,
+            "source_path": str(MCP_SOURCE_PATH),
+            "error": f"{type(exc).__name__}: {exc}",
+            "source_changed_since_process_start": None,
+            "restart_required": None,
+            "read_only": True,
+            "live_order_allowed": False,
+        }
 
 
 def _mcp_manifest() -> dict[str, Any]:
@@ -1375,7 +1531,11 @@ def _mcp_manifest() -> dict[str, Any]:
         {} if receipt else _read_mcp_stale_client_exposure_receipt()
     )
     if receipt:
-        receipt_names = set(receipt.get("client_tool_names") or [])
+        receipt_names = set(
+            receipt.get("client_resolved_tool_names")
+            or receipt.get("client_tool_names")
+            or []
+        )
         receipt_schema_sha256 = str(receipt.get("client_schema_sha256") or "").lower()
         receipt_name_set_matches = receipt_names == set(names)
         receipt_schema_matches = receipt_schema_sha256 == server_schema_sha256
@@ -1403,6 +1563,8 @@ def _mcp_manifest() -> dict[str, Any]:
         os.environ.get("CODEXSTOCK_MCP_LAST_SCHEMA_REFRESH_AT", "") or ""
     ).strip()
     exposed_names: list[str] | None = None
+    resolved_exposed_names: list[str] | None = None
+    exposed_aliases: dict[str, str] = {}
     observation_source = "not_reported_by_client"
     if exposed_raw:
         try:
@@ -1411,9 +1573,14 @@ def _mcp_manifest() -> dict[str, Any]:
             parsed_exposed = [value.strip() for value in exposed_raw.split(",") if value.strip()]
         if isinstance(parsed_exposed, list):
             exposed_names = sorted({str(value) for value in parsed_exposed if str(value)})
+            resolved_exposed_names = list(exposed_names)
             observation_source = "CODEXSTOCK_MCP_EXPOSED_TOOL_NAMES"
     elif receipt:
         exposed_names = list(receipt.get("client_tool_names") or [])
+        resolved_exposed_names = list(
+            receipt.get("client_resolved_tool_names") or exposed_names
+        )
+        exposed_aliases = dict(receipt.get("client_tool_aliases") or {})
         exposed_schema_sha256 = str(receipt.get("client_schema_sha256") or "").lower()
         last_schema_refresh_at = str(receipt.get("client_observed_at") or "")
         observation_source = "persistent_client_receipt"
@@ -1421,18 +1588,14 @@ def _mcp_manifest() -> dict[str, Any]:
         observation_source = "quarantined_stale_client_receipt"
         last_schema_refresh_at = str(quarantined_receipt.get("client_observed_at") or "")
     server_name_set = set(names)
-    exposed_name_set = set(exposed_names or [])
+    exposed_name_set = set(resolved_exposed_names or exposed_names or [])
     names_match = exposed_name_set == server_name_set if exposed_names is not None else None
     hash_match = (
         exposed_schema_sha256 == server_schema_sha256
         if exposed_schema_sha256
         else None
     )
-    if quarantined_receipt and exposed_names is None:
-        exposure_status = "MISMATCH"
-        schema_match = False
-        hash_match = False
-    elif names_match is None and hash_match is None:
+    if names_match is None and hash_match is None:
         exposure_status = "CLIENT_EXPOSURE_UNOBSERVED"
         schema_match: bool | None = None
     elif names_match is True and hash_match is None:
@@ -1445,11 +1608,36 @@ def _mcp_manifest() -> dict[str, Any]:
         exposure_status = "MISMATCH"
         schema_match = False
     active_quarantined_receipt = quarantined_receipt if exposed_names is None else {}
-    stale_name_set = set(active_quarantined_receipt.get("client_tool_names") or [])
-    observed_name_set = exposed_name_set if exposed_names is not None else stale_name_set
-    has_observed_names = exposed_names is not None or bool(quarantined_receipt)
+    stale_name_set = set(
+        active_quarantined_receipt.get("client_resolved_tool_names")
+        or active_quarantined_receipt.get("client_tool_names")
+        or []
+    )
+    # A quarantined receipt is historical context, never current client
+    # exposure evidence. Only an active receipt or explicit environment
+    # observation may produce current missing/core coverage counts.
+    observed_name_set = exposed_name_set
+    has_observed_names = exposed_names is not None
     missing_on_client = sorted(server_name_set - observed_name_set) if has_observed_names else []
     unknown_on_client = sorted(observed_name_set - server_name_set) if has_observed_names else []
+    declared_core_name_set = set(MCP_CORE_TOOL_NAMES)
+    undeclared_core_tools = sorted(declared_core_name_set - server_name_set)
+    core_name_set = declared_core_name_set & server_name_set
+    core_exposed_names = sorted(core_name_set & observed_name_set) if has_observed_names else []
+    core_missing_on_client = sorted(core_name_set - observed_name_set) if has_observed_names else []
+    core_coverage_pct = (
+        round(len(core_exposed_names) / len(core_name_set) * 100.0, 2)
+        if core_name_set and has_observed_names
+        else None
+    )
+    if not has_observed_names:
+        core_exposure_status = "CLIENT_EXPOSURE_UNOBSERVED"
+    elif undeclared_core_tools:
+        core_exposure_status = "SERVER_CORE_DECLARATION_INVALID"
+    elif core_missing_on_client:
+        core_exposure_status = "CORE_MISMATCH"
+    else:
+        core_exposure_status = "CORE_MATCHED"
     server_publish_complete = bool(
         names
         and len(names) == len(schema_material)
@@ -1472,6 +1660,14 @@ def _mcp_manifest() -> dict[str, Any]:
         client_cache_status = "OBSERVATION_REQUIRED"
         client_schema_refresh_required = None
         availability_truth = "server_published_all_client_observation_pending"
+    if exposure_status == "MATCHED":
+        reconciliation_next_action = "NONE"
+    elif exposure_status == "NAMES_MATCHED_SCHEMA_UNVERIFIED":
+        reconciliation_next_action = "RESUBMIT_RECEIPT_WITH_SCHEMA_HASH"
+    elif exposure_status == "MISMATCH":
+        reconciliation_next_action = "REFRESH_CONNECTOR_SCHEMA_AND_RESUBMIT_RECEIPT"
+    else:
+        reconciliation_next_action = "REPORT_CLIENT_TOOL_SURFACE"
     exposure = {
         "status": exposure_status,
         "sync_status": exposure_status,
@@ -1534,6 +1730,15 @@ def _mcp_manifest() -> dict[str, Any]:
             if active_quarantined_receipt
             else None
         ),
+        "client_resolved_tool_names_sha256": (
+            receipt.get("client_resolved_tool_names_sha256")
+            if observation_source == "persistent_client_receipt"
+            else active_quarantined_receipt.get("client_resolved_tool_names_sha256")
+            if active_quarantined_receipt
+            else None
+        ),
+        "client_tool_alias_count": len(exposed_aliases),
+        "client_tool_aliases_applied": bool(exposed_aliases),
         "evidence_level": (
             "full_name_and_schema_hash"
             if exposure_status == "MATCHED"
@@ -1550,6 +1755,39 @@ def _mcp_manifest() -> dict[str, Any]:
         "unknown_on_client_count": len(unknown_on_client),
         "filtered_tool_names": missing_on_client,
         "stale_tool_names": unknown_on_client,
+        "core_exposure_status": core_exposure_status,
+        "core_server_tool_count": len(core_name_set),
+        "core_client_exposed_tool_count": (
+            len(core_exposed_names) if has_observed_names else None
+        ),
+        "core_coverage_pct": core_coverage_pct,
+        "core_tool_name_set_match": (
+            not core_missing_on_client and not undeclared_core_tools
+            if has_observed_names
+            else None
+        ),
+        "core_missing_on_client": core_missing_on_client,
+        "core_missing_on_client_count": len(core_missing_on_client),
+        "undeclared_core_tools": undeclared_core_tools,
+        "undeclared_core_tool_count": len(undeclared_core_tools),
+        "reconciliation": {
+            "schema": "codexstock.mcp-exposure-reconciliation.v3",
+            "full_surface_status": exposure_status,
+            "core_surface_status": core_exposure_status,
+            "server_schema_sha256": server_schema_sha256,
+            "client_schema_sha256": exposed_schema_sha256 or None,
+            "full_server_tool_count": len(names),
+            "full_client_tool_count": len(observed_name_set) if has_observed_names else None,
+            "full_missing_tool_count": len(missing_on_client),
+            "core_server_tool_count": len(core_name_set),
+            "core_client_tool_count": len(core_exposed_names) if has_observed_names else None,
+            "core_missing_tool_count": len(core_missing_on_client),
+            "next_action": reconciliation_next_action,
+            "exact_match_requires_names_and_schema_hash": True,
+            "connector_name_aliases_supported": True,
+            "connector_name_alias_count": len(exposed_aliases),
+            "automatically_reconciled_on_manifest_call": True,
+        },
         "observation_source": observation_source,
         "receipt_path": str(_mcp_client_exposure_receipt_path()),
         "stale_receipt_path": (
@@ -1590,16 +1828,21 @@ def _mcp_manifest() -> dict[str, Any]:
             }
         )
     ]
+    runtime_source = _mcp_runtime_source_freshness()
     return {
         "server_name": SERVER_NAME,
         "server_version": SERVER_VERSION,
         "base_url": BASE_URL,
+        "runtime_source": runtime_source,
         "tool_count": len(names),
         "tool_names": names,
         "tool_category_counts": {key: len(value) for key, value in categories.items()},
         "tool_categories": categories,
         "external_learning_tool_count": len(external_names),
         "external_learning_tool_names": external_names,
+        "core_tool_count": len(core_name_set),
+        "core_tool_names": sorted(core_name_set),
+        "undeclared_core_tools": undeclared_core_tools,
         "server_schema_sha256": server_schema_sha256,
         "client_exposure": exposure,
         "diagnosis_hint": (
@@ -1624,6 +1867,7 @@ def _mcp_manifest_summary() -> dict[str, Any]:
         "tool_category_counts": manifest.get("tool_category_counts", {}),
         "external_learning_tool_count": manifest.get("external_learning_tool_count"),
         "server_schema_sha256": manifest.get("server_schema_sha256"),
+        "runtime_source": manifest.get("runtime_source", {}),
         "client_exposure": manifest.get("client_exposure", {}),
         "diagnosis_hint": manifest.get("diagnosis_hint"),
         "fallback_hint": manifest.get("fallback_hint"),
@@ -1638,6 +1882,123 @@ def _attach_mcp_manifest(payload: Any) -> Any:
         enriched.update(payload)
         return enriched
     return {"ok": True, "upstream": payload, "mcp_server_manifest": _mcp_manifest_summary()}
+
+
+def _weakness_completion_audit_summary(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "request_succeeded": False,
+            "error": "invalid_weakness_completion_audit_payload",
+            "summary_only": True,
+        }
+    if payload.get("error"):
+        compact_error = dict(payload)
+        compact_error["request_succeeded"] = False
+        compact_error["summary_only"] = True
+        return compact_error
+
+    item_rows: list[dict[str, Any]] = []
+    for row in payload.get("items", []):
+        if not isinstance(row, dict):
+            continue
+        item_rows.append(
+            {
+                "id": row.get("id"),
+                "title": row.get("title"),
+                "implementation_verified": bool(row.get("implementation_verified")),
+                "current_evidence_passed": bool(row.get("current_evidence_passed")),
+                "status": row.get("status"),
+                "blockers": row.get("blockers") or [],
+            }
+        )
+
+    objective = payload.get("objective_scope") if isinstance(payload.get("objective_scope"), dict) else {}
+    track_rows: list[dict[str, Any]] = []
+    for row in objective.get("tracks", []):
+        if not isinstance(row, dict):
+            continue
+        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        track_rows.append(
+            {
+                "id": row.get("id"),
+                "label": row.get("label"),
+                "system_ready": bool(row.get("system_ready")),
+                "current_outcome_passed": bool(row.get("current_outcome_passed")),
+                "completion_requirement": row.get("completion_requirement"),
+                "status": detail.get("status"),
+                "progress_label": detail.get("progress_label"),
+                "blockers": detail.get("blockers") or [],
+            }
+        )
+
+    pending_rows: list[dict[str, Any]] = []
+    pending_keys = (
+        "id",
+        "status",
+        "next_action",
+        "next_candidate_start_date",
+        "minimum_candidate_end_date",
+        "next_eligible_date",
+        "days_until_next_eligible",
+        "official_blocker",
+        "confidence_gate_blockers",
+        "future_counterfactual_state",
+        "preregistration_status",
+        "preregistration_contract_remaining_triplet_count",
+        "due_preregistration_status",
+        "operator_message",
+    )
+    for row in payload.get("pending_evidence_summary", []):
+        if isinstance(row, dict):
+            pending_rows.append({key: row.get(key) for key in pending_keys if key in row})
+
+    technical = payload.get("technical_review") if isinstance(payload.get("technical_review"), dict) else {}
+    return {
+        "ok": bool(payload.get("ok")),
+        "request_succeeded": True,
+        "schema": payload.get("schema"),
+        "evidence_contract_version": payload.get("evidence_contract_version"),
+        "generated_at": payload.get("generated_at"),
+        "status": payload.get("status"),
+        "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
+        "items": item_rows,
+        "objective_scope": {
+            "track_count": objective.get("track_count"),
+            "system_ready_count": objective.get("system_ready_count"),
+            "system_progress_pct": objective.get("system_progress_pct"),
+            "current_outcome_passed_count": objective.get("current_outcome_passed_count"),
+            "current_outcome_progress_pct": objective.get("current_outcome_progress_pct"),
+            "implementation_ready": objective.get("implementation_ready"),
+            "required_outcomes_ready": objective.get("required_outcomes_ready"),
+            "tracks": track_rows,
+        },
+        "technical_review": {
+            "status": technical.get("status"),
+            "summary": technical.get("summary") if isinstance(technical.get("summary"), dict) else {},
+        },
+        "pending_evidence_summary": pending_rows,
+        "pending_evidence_operator_messages": payload.get("pending_evidence_operator_messages") or [],
+        "next_best_actions": payload.get("next_best_actions") or [],
+        "collector_errors": payload.get("collector_errors") if isinstance(payload.get("collector_errors"), dict) else {},
+        "official_completion_claim_allowed": bool(payload.get("official_completion_claim_allowed")),
+        "unverified_result_affects_score": bool(payload.get("unverified_result_affects_score")),
+        "unverified_result_affects_live_candidate": bool(payload.get("unverified_result_affects_live_candidate")),
+        "live_order_allowed": False,
+        "safety": payload.get("safety"),
+        "cache": {
+            "cached": bool(payload.get("cached")),
+            "stale": bool(payload.get("stale")),
+            "refreshing": bool(payload.get("refreshing")),
+            "refresh_requested": bool(payload.get("refresh_requested")),
+            "cache_age_seconds": payload.get("cache_age_seconds"),
+            "cache_source": payload.get("cache_source"),
+            "status_cache_error": payload.get("status_cache_error"),
+            "refresh_timed_out": bool(payload.get("refresh_timed_out")),
+        },
+        "summary_only": True,
+        "full_audit_endpoint": "/api/codexstock/weakness-completion-audit",
+    }
 
 
 def _external_improvement_status_summary(payload: Any) -> dict[str, Any]:
@@ -1804,7 +2165,112 @@ def _external_improvement_status_summary(payload: Any) -> dict[str, Any]:
     }
 
 
+def _knowledge_curator_status_summary(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "invalid_knowledge_curator_status_payload"}
+    if payload.get("ok") is False:
+        return dict(payload)
+    scheduler = payload.get("scheduler") if isinstance(payload.get("scheduler"), dict) else {}
+    status_cache = payload.get("status_cache") if isinstance(payload.get("status_cache"), dict) else {}
+    engine_rows: list[dict[str, Any]] = []
+    failed_count = 1 if str(scheduler.get("last_error") or "").strip() else 0
+    stale_count = 0
+    ready_count = 0
+    latest_engine_completed_at = ""
+    for row in payload.get("engines", []):
+        if not isinstance(row, dict):
+            continue
+        last_status = str(row.get("last_status") or "")
+        if last_status == "failed":
+            failed_count += 1
+        if bool(row.get("index_stale")):
+            stale_count += 1
+        if bool(row.get("operational_ready")):
+            ready_count += 1
+        completed_at = str(row.get("last_completed_at") or "")
+        if completed_at > latest_engine_completed_at:
+            latest_engine_completed_at = completed_at
+        engine_rows.append(
+            {
+                "engine_id": row.get("engine_id"),
+                "readiness": row.get("readiness"),
+                "runtime_installed": bool(row.get("runtime_installed")),
+                "runtime_probe": row.get("runtime_probe"),
+                "runtime_probe_stale": bool(row.get("runtime_probe_stale")),
+                "automatic_enabled": bool(row.get("automatic_enabled")),
+                "last_status": last_status,
+                "last_completed_at": completed_at,
+                "coverage_state": row.get("coverage_state"),
+                "index_stale": bool(row.get("index_stale")),
+                "blockers": row.get("prerequisite_blockers") or [],
+            }
+        )
+    last_indexed_at = str(
+        scheduler.get("last_success_at")
+        or latest_engine_completed_at
+        or ""
+    )
+    source_freshness_seconds: float | None = None
+    if last_indexed_at:
+        try:
+            parsed = datetime.fromisoformat(last_indexed_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            source_freshness_seconds = round(
+                max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()),
+                1,
+            )
+        except ValueError:
+            source_freshness_seconds = None
+    current_phase = str(scheduler.get("current_phase") or "")
+    pending = current_phase not in {"", "idle", "sleeping"}
+    return {
+        "ok": True,
+        "schema": "codexstock_knowledge_curator_status_summary_v1",
+        "employee": payload.get("employee"),
+        "mode": payload.get("mode"),
+        "indexed_documents": payload.get("indexed_documents"),
+        "indexed_sources": payload.get("indexed_sources"),
+        "discoverable_source_count": payload.get("discoverable_source_count"),
+        "archive_source_count": payload.get("archive_source_count"),
+        "last_indexed_at": last_indexed_at or None,
+        "source_freshness_seconds": source_freshness_seconds,
+        "pending": pending,
+        "failures": failed_count,
+        "duplicates": None,
+        "duplicates_available": False,
+        "scheduler": {
+            "running": bool(scheduler.get("running")),
+            "thread_alive": bool(scheduler.get("thread_alive")),
+            "current_phase": current_phase or None,
+            "current_engine": scheduler.get("current_engine") or None,
+            "last_success_at": scheduler.get("last_success_at") or None,
+            "last_error": scheduler.get("last_error") or None,
+            "last_elapsed_seconds": scheduler.get("last_elapsed_seconds"),
+        },
+        "engine_summary": {
+            "count": len(engine_rows),
+            "operational_ready_count": ready_count,
+            "stale_count": stale_count,
+            "failed_count": sum(1 for row in engine_rows if row["last_status"] == "failed"),
+        },
+        "engines": engine_rows,
+        "dependency_probe_mode": payload.get("dependency_probe_mode"),
+        "status_cache": {
+            "cached": bool(status_cache.get("cached")),
+            "age_seconds": status_cache.get("age_seconds"),
+            "refresh_in_progress": bool(status_cache.get("refresh_in_progress")),
+        },
+        "source_immutable": bool(payload.get("source_immutable")),
+        "live_order_allowed": False,
+        "summary_only": True,
+    }
+
+
 ASK_AGENT_ROUTABLE_TOOLS = {
+    "codexstock_knowledge_curator_status",
+    "codexstock_knowledge_search",
+    "codexstock_knowledge_engine_plan",
     "codexstock_internal_developer_status",
     "codexstock_internal_developer_component_status",
     "codexstock_internal_developer_list_incidents",
@@ -1898,7 +2364,7 @@ def _agent_local_fallback(question: str, max_chars: int) -> dict[str, Any] | Non
                 {
                     "ok": False,
                     "blocked": True,
-                    "message": "codexstock_ask_agent router only allows bounded internal-developer and external-learning MCP tools.",
+                    "message": "codexstock_ask_agent router only allows bounded read-only operations and explicitly approved advice intake tools.",
                     "requested_tool": tool_name,
                     "allowed_tools": sorted(ASK_AGENT_ROUTABLE_TOOLS),
                     "mcp_server_manifest": _mcp_manifest(),
@@ -1942,6 +2408,46 @@ def _agent_local_fallback(question: str, max_chars: int) -> dict[str, Any] | Non
         else:
             tool_name = "codexstock_internal_developer_brief"
             routed_arguments = {"incident_limit": 5, "activity_limit": 10}
+        routed_arguments["max_chars"] = max_chars
+        result = _call_tool(tool_name, routed_arguments)
+        if isinstance(result, dict):
+            result["routed_via"] = "codexstock_ask_agent"
+            result["routed_tool"] = tool_name
+            result["schema_cache_fallback"] = True
+        return result
+    knowledge_curator_tokens = (
+        "knowledgecurator",
+        "knowledge-curator",
+        "knowledge_curator",
+        "knowledgesearch",
+        "knowledge-search",
+        "knowledge_search",
+        "knowledgeengineplan",
+        "knowledge-engine-plan",
+        "knowledge_engine_plan",
+        "지식관리",
+        "지식정리",
+        "지식검색",
+        "자료정리",
+        "회의기록검색",
+        "연구기록검색",
+    )
+    if any(token in compact for token in knowledge_curator_tokens):
+        if any(token in compact for token in ("search", "find", "검색", "찾아", "조회")) and not any(
+            token in compact for token in ("status", "상태", "현황", "최근색인")
+        ):
+            tool_name = "codexstock_knowledge_search"
+            routed_arguments = {"query": question, "limit": 10}
+        elif any(token in compact for token in ("engineplan", "engine-plan", "engine_plan", "실행계획", "엔진계획")):
+            tool_name = "codexstock_knowledge_engine_plan"
+            routed_arguments = {
+                "changed_documents": 0,
+                "market_open": False,
+                "heavy_work_allowed": False,
+            }
+        else:
+            tool_name = "codexstock_knowledge_curator_status"
+            routed_arguments = {}
         routed_arguments["max_chars"] = max_chars
         result = _call_tool(tool_name, routed_arguments)
         if isinstance(result, dict):
@@ -3556,9 +4062,19 @@ TOOLS = [
     _tool("research_corporate_action_adjust", "Backward-adjust OHLCV for official KRX splits, reverse splits, cash dividends, or rights issues and return an immutable adjustment ledger.", {"rows": {"type": "array", "items": {"type": "object"}, "minItems": 2, "maxItems": 10000}, "actions": {"type": "array", "items": {"type": "object"}, "minItems": 1, "maxItems": 100}}, ["rows", "actions"]),
     _tool("research_corporate_action_status", "Return integrity-verified official corporate-action datasets and completeness declarations."),
     _tool("research_corporate_action_register", "Persist an official-source corporate-action history with a deterministic content hash.", {"dataset_id": {"type": "string"}, "symbol": {"type": "string"}, "actions": {"type": "array", "items": {"type": "object"}, "minItems": 1, "maxItems": 10000}, "complete_history": {"type": "boolean", "default": False}}, ["dataset_id", "symbol", "actions"]),
-    _tool("research_corporate_action_register_verified", "Download each KRX/KIND source document read-only, verify its exact SHA-256, and then persist the corporate-action history.", {"dataset_id": {"type": "string"}, "symbol": {"type": "string"}, "actions": {"type": "array", "items": {"type": "object"}, "minItems": 1, "maxItems": 1000}, "complete_history": {"type": "boolean", "default": False}, "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 60, "default": 15}, "max_document_bytes": {"type": "integer", "minimum": 1024, "maximum": 50000000, "default": 10000000}, "attempts": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3}}, ["dataset_id", "symbol", "actions"]),
+    _tool("research_corporate_action_register_verified", "Download each KRX/KIND source document read-only, verify its exact SHA-256, and then persist the corporate-action history.", {"dataset_id": {"type": "string"}, "symbol": {"type": "string"}, "actions": {"type": "array", "items": {"type": "object"}, "minItems": 1, "maxItems": 1000}, "complete_history": {"type": "boolean", "default": False}, "history_start": {"type": "string", "default": ""}, "history_end": {"type": "string", "default": ""}, "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 60, "default": 15}, "max_document_bytes": {"type": "integer", "minimum": 1024, "maximum": 50000000, "default": 10000000}, "attempts": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3}}, ["dataset_id", "symbol", "actions"]),
     _tool("research_corporate_action_query", "Query a registered corporate-action dataset over an inclusive effective-date range.", {"dataset_id": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"}}, ["dataset_id"]),
     _tool("research_corporate_action_adjust_registered", "Backward-adjust OHLCV using only actions from an integrity-verified registered dataset.", {"dataset_id": {"type": "string"}, "rows": {"type": "array", "items": {"type": "object"}, "minItems": 2, "maxItems": 10000}}, ["dataset_id", "rows"]),
+    _tool("research_corporate_action_reconcile", "Audit expected symbols against complete source-verified corporate-action coverage without placing orders.", {"symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 5000}, "coverage_start": {"type": "string"}, "coverage_end": {"type": "string"}}, ["symbols", "coverage_start", "coverage_end"]),
+    _tool("research_instrument_contracts", "List strict research data contracts for Korean and US equities and ETFs, including currency, quote unit, timezone, lot size, and provider boundaries."),
+    _tool("research_instrument_validate", "Validate one market snapshot against its market, asset, currency, quote-unit, timestamp, lot-size, and provider contract.", {"snapshot": {"type": "object"}}, ["snapshot"]),
+    _tool("research_shard_batch_create", "Create a durable research-only batch split into integrity-hashed shards for independent workers.", {"job_type": {"type": "string"}, "payloads": {"type": "array", "items": {"type": "object"}, "minItems": 1, "maxItems": 10000}}, ["job_type", "payloads"]),
+    _tool("research_shard_claim", "Atomically claim one pending research shard with a bounded worker lease.", {"batch_id": {"type": "string"}, "worker_id": {"type": "string"}, "lease_seconds": {"type": "integer", "minimum": 30, "maximum": 3600, "default": 300}}, ["batch_id", "worker_id"]),
+    _tool("research_shard_heartbeat", "Refresh ownership of a running research shard.", {"batch_id": {"type": "string"}, "shard_id": {"type": "string"}, "worker_token": {"type": "string"}}, ["batch_id", "shard_id", "worker_token"]),
+    _tool("research_shard_finish", "Persist a hashed research shard result or safely requeue/fail it; never executes orders.", {"batch_id": {"type": "string"}, "shard_id": {"type": "string"}, "worker_token": {"type": "string"}, "result": {"type": "object"}, "error": {"type": "string", "default": ""}, "retryable": {"type": "boolean", "default": False}}, ["batch_id", "shard_id", "worker_token"]),
+    _tool("research_shard_status", "Verify and summarize a durable distributed research batch.", {"batch_id": {"type": "string"}}, ["batch_id"]),
+    _tool("research_stability_record", "Append an integrity-chained read-only snapshot of every sub-engine for long-term reliability evidence.", {"dashboard": {"type": "object"}, "min_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 86400, "default": 300}}, ["dashboard"]),
+    _tool("research_stability_audit", "Audit sub-engine success ratios, observation gaps, contract drift, and consecutive failures over time.", {"window_days": {"type": "integer", "minimum": 1, "maximum": 3650, "default": 30}, "max_gap_seconds": {"type": "integer", "minimum": 1, "maximum": 86400, "default": 900}}),
     _tool("research_strategy_validate", "Validate a research-only strategy definition without executing it.", {"strategy": {"type": "object", "additionalProperties": True}}, ["strategy"]),
     _tool(
         "research_experiment_create",
@@ -3681,6 +4197,7 @@ TOOLS = [
     _tool("research_microstructure_worker_resume", "Resume a KIS polling worker from its persistent checkpoint.", {"worker_id": {"type": "string"}, "max_cycles": {"type": "integer", "minimum": 1, "maximum": 100000}}, ["worker_id"]),
     _tool("research_realtime_status", "Return read-only KIS WebSocket configuration, dependency and checkpoint status."),
     _tool("research_realtime_start", "Start bounded read-only KIS WebSocket tick/order-book collection with reconnect and subscription restore.", {"symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 40}, "max_messages": {"type": "integer", "minimum": 0, "maximum": 100000, "default": 1000}, "duration_seconds": {"type": "number", "minimum": 0, "maximum": 86400, "default": 0}, "max_reconnects": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 20}, "heartbeat_timeout": {"type": "number", "minimum": 1, "maximum": 300, "default": 30}}, ["symbols"]),
+    _tool("research_realtime_resume", "Resume only the remaining duration of a failed or stale read-only realtime collection and preserve run lineage.", {"max_reconnects": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 20}, "heartbeat_timeout": {"type": "number", "minimum": 1, "maximum": 300, "default": 30}}),
     _tool("research_realtime_runs", "Verify and return immutable SHA-256 evidence from bounded KIS WebSocket collection runs.", {"limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50}}),
     _tool("research_microstructure_quality", "Return duplicate and timestamp-gap quality evidence for recorded microstructure streams."),
     _tool(
@@ -3814,6 +4331,28 @@ TOOLS = [
         {
             "detail": {"type": "string", "enum": ["instant", "quick", "full"], "default": "instant"},
             "full": {"type": "boolean", "default": False, "description": "Legacy alias for detail='full'."},
+        },
+    ),
+    _tool(
+        "codexstock_knowledge_curator_status",
+        "지식관리 직원의 상시 실행 상태, 원본 불변 인덱스 규모, LlamaIndex·Qdrant·Graphiti·GraphRAG 준비도와 최근 실행 증거를 조회합니다.",
+    ),
+    _tool(
+        "codexstock_knowledge_search",
+        "회의·복기·연구·매매일지 검색 투영에서 근거 경로와 해시를 포함해 지식을 검색합니다. 원본 원장은 수정하지 않습니다.",
+        {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+        },
+        ["query"],
+    ),
+    _tool(
+        "codexstock_knowledge_engine_plan",
+        "새 근거량과 장 운영 상태에 따라 어떤 지식 하위엔진을 실행하거나 미룰지 읽기 전용으로 확인합니다.",
+        {
+            "changed_documents": {"type": "integer", "minimum": 0, "maximum": 1000000, "default": 0},
+            "market_open": {"type": "boolean", "default": False},
+            "heavy_work_allowed": {"type": "boolean", "default": False},
         },
     ),
     _tool(
@@ -4191,6 +4730,10 @@ TOOLS = [
         {"force": {"type": "boolean", "default": False}},
     ),
     _tool(
+        "codexstock_research_forge_integration_audit",
+        "Verify that Research Forge is recognized and consumed by CodexStock staff, experiment validation, Paper promotion, feature health, MCP, and the shared runtime root. Read-only.",
+    ),
+    _tool(
         "codexstock_external_improvement_status",
         "Return the research-only external-engine improvement loop state, per-engine validation results, verified lessons, and retraining queue. Read-only and never submits orders.",
         {
@@ -4285,6 +4828,39 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         )
         payload = _attach_internal_developer_attention(payload)
         return _tool_result(_attach_mcp_manifest(payload), max_chars=max_chars)
+    if name == "codexstock_knowledge_curator_status":
+        payload = _http_json("GET", "/api/knowledge-curator/status", timeout_seconds=15.0)
+        return _tool_result(
+            _knowledge_curator_status_summary(payload),
+            max_chars=max_chars,
+        )
+    if name == "codexstock_knowledge_search":
+        return _tool_result(
+            _http_json(
+                "GET",
+                "/api/knowledge-curator/search",
+                {
+                    "q": str(arguments.get("query") or ""),
+                    "limit": _int_arg(arguments, "limit", 10, 1, 50),
+                },
+                timeout_seconds=15.0,
+            ),
+            max_chars=max_chars,
+        )
+    if name == "codexstock_knowledge_engine_plan":
+        return _tool_result(
+            _http_json(
+                "GET",
+                "/api/knowledge-curator/engine-plan",
+                {
+                    "changed_documents": _int_arg(arguments, "changed_documents", 0, 0, 1000000),
+                    "market_open": int(_bool_arg(arguments, "market_open", False)),
+                    "heavy_work_allowed": int(_bool_arg(arguments, "heavy_work_allowed", False)),
+                },
+                timeout_seconds=15.0,
+            ),
+            max_chars=max_chars,
+        )
     if name == "codexstock_internal_developer_status":
         return _tool_result(_internal_developer_direct(name, arguments), max_chars=max_chars)
     if name == "codexstock_internal_developer_component_status":
@@ -4682,12 +5258,14 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             max_chars=max_chars,
         )
     if name == "codexstock_weakness_completion_audit":
+        refresh_requested = _bool_arg(arguments, "force", False)
+        audit = _http_json(
+            "GET",
+            "/api/codexstock/weakness-completion-audit",
+            {"refresh": 1} if refresh_requested else {"force": 0},
+        )
         return _tool_result(
-            _http_json(
-                "GET",
-                "/api/codexstock/weakness-completion-audit",
-                {"force": int(_bool_arg(arguments, "force", False))},
-            ),
+            _weakness_completion_audit_summary(audit),
             max_chars=max_chars,
         )
     if name == "codexstock_runtime_deployment_freshness":
@@ -4831,6 +5409,11 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         force = bool(arguments.get("force", False))
         path = "/api/external-engines/status?force=1" if force else "/api/external-engines/status"
         return _tool_result(_http_json("GET", path), max_chars=max_chars)
+    if name == "codexstock_research_forge_integration_audit":
+        return _tool_result(
+            _http_json("GET", "/api/research-forge/integration-audit"),
+            max_chars=max_chars,
+        )
     if name == "codexstock_external_improvement_status":
         lesson_limit = _int_arg(arguments, "lesson_limit", 5, 1, 20)
         task_limit = _int_arg(arguments, "task_limit", 10, 1, 50)

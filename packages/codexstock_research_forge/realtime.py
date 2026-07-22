@@ -118,7 +118,11 @@ class ReliableKisRealtimeCollector:
     transport_factory: Callable[[], WebSocketTransport]
     approval_key: str
 
-    def run(self, symbols: list[str], max_messages: int = 0, max_reconnects: int = 20, heartbeat_timeout: float = 30.0, cancelled: Callable[[], bool] | None = None, duration_seconds: float = 0.0) -> dict[str, Any]:
+    def run(
+        self, symbols: list[str], max_messages: int = 0, max_reconnects: int = 20,
+        heartbeat_timeout: float = 30.0, cancelled: Callable[[], bool] | None = None,
+        duration_seconds: float = 0.0, session_chain_id: str = "", resumed_from_run_id: str = "",
+    ) -> dict[str, Any]:
         normalized = sorted(set(str(value) for value in symbols))
         if not normalized or len(normalized) > 40: raise ValueError("KIS realtime collector requires 1..40 symbols")
         for symbol in normalized: subscription_message(self.approval_key, TICK_TR_ID, symbol)
@@ -128,7 +132,8 @@ class ReliableKisRealtimeCollector:
         lease = self._claim(float(heartbeat_timeout))
         state = self._load(); run_started = datetime.now(timezone.utc).isoformat(); run_started_monotonic = time.monotonic(); run_id = f"realtime_run_{uuid4().hex}"
         initial_connections = int(state.get("connection_count") or 0); initial_restores = int(state.get("subscription_restore_count") or 0)
-        state.update({"schema_version": 1, "status": "RUNNING", "symbols": normalized, "read_only": True, "order_allowed": False, "max_messages": int(max_messages), "requested_duration_seconds": duration_seconds, "heartbeat_timeout": float(heartbeat_timeout), "last_error": None, "run_started_at": run_started, "run_id": run_id, "run_message_count": 0, "run_data_messages": 0, "run_accepted_events": 0, "run_duplicate_events": 0, "run_reconnect_count": 0})
+        chain_id = session_chain_id or run_id
+        state.update({"schema_version": 1, "status": "RUNNING", "symbols": normalized, "read_only": True, "order_allowed": False, "max_messages": int(max_messages), "requested_duration_seconds": duration_seconds, "heartbeat_timeout": float(heartbeat_timeout), "last_error": None, "run_started_at": run_started, "run_id": run_id, "session_chain_id": chain_id, "resumed_from_run_id": resumed_from_run_id or None, "run_message_count": 0, "run_data_messages": 0, "run_accepted_events": 0, "run_duplicate_events": 0, "run_reconnect_count": 0})
         messages_this_run = 0; reconnects_this_run = 0; recovered_errors_this_run = 0; accepted_this_run = 0; duplicates_this_run = 0; data_this_run = 0; heartbeats_this_run = 0; gaps_this_run = 0; boundary_gaps_this_run = 0; seen_streams: set[str] = set(); transport = None; connected_once = False
         deadline = time.monotonic() + duration_seconds if duration_seconds > 0 else None
         def active() -> bool: return (int(max_messages) <= 0 or messages_this_run < int(max_messages)) and (deadline is None or time.monotonic() < deadline)
@@ -194,11 +199,30 @@ class ReliableKisRealtimeCollector:
                 # event IDs. Losslessness is governed by gaps and reconnect recovery, while the raw
                 # duplicate count remains explicit evidence.
                 in_session_ok = gaps_this_run == 0 and recovery_ok
-                state["last_run"] = {"run_id": run_id, "started_at": run_started, "finished_at": datetime.now(timezone.utc).isoformat(), "requested_duration_seconds": duration_seconds, "elapsed_seconds": round(elapsed, 6), "duration_completed": duration_completed, "completion_reason": completion_reason, "messages": messages_this_run, "data_messages": data_this_run, "accepted_events": accepted_this_run, "duplicate_events": duplicates_this_run, "reconnects": reconnects_this_run, "recovered_errors": recovered_errors_this_run, "connections": connections_this_run, "subscription_restores": restores_this_run, "reconnect_recovery_ok": recovery_ok, "heartbeats": heartbeats_this_run, "in_session_gap_count": gaps_this_run, "session_boundary_gap_count": boundary_gaps_this_run, "in_session_quality_ok": in_session_ok, "continuous_quality_ok": in_session_ok and boundary_gaps_this_run == 0}
+                state["last_run"] = {"run_id": run_id, "session_chain_id": chain_id, "resumed_from_run_id": resumed_from_run_id or None, "started_at": run_started, "finished_at": datetime.now(timezone.utc).isoformat(), "requested_duration_seconds": duration_seconds, "elapsed_seconds": round(elapsed, 6), "duration_completed": duration_completed, "completion_reason": completion_reason, "messages": messages_this_run, "data_messages": data_this_run, "accepted_events": accepted_this_run, "duplicate_events": duplicates_this_run, "reconnects": reconnects_this_run, "recovered_errors": recovered_errors_this_run, "connections": connections_this_run, "subscription_restores": restores_this_run, "reconnect_recovery_ok": recovery_ok, "heartbeats": heartbeats_this_run, "in_session_gap_count": gaps_this_run, "session_boundary_gap_count": boundary_gaps_this_run, "in_session_quality_ok": in_session_ok, "continuous_quality_ok": in_session_ok and boundary_gaps_this_run == 0}
                 state["last_run_evidence"] = self._write_run_evidence(state)
                 state["updated_at"] = datetime.now(timezone.utc).isoformat(); self._save(state)
             finally: self._release(lease)
         return {"ok": state["status"] == "COMPLETED", "collector": state, "run_quality": state["last_run"], "quality": self.store.quality()}
+
+    def resume_interrupted(self, max_reconnects: int = 20, heartbeat_timeout: float = 30.0) -> dict[str, Any]:
+        checkpoint = self._load(); status = str(checkpoint.get("status") or "")
+        if status not in {"FAILED", "CANCELLED", "RUNNING"}:
+            raise ValueError("realtime resume requires a failed, cancelled, or stale running checkpoint")
+        if status == "RUNNING":
+            try: age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(checkpoint["updated_at"]))).total_seconds()
+            except (KeyError, TypeError, ValueError) as exc: raise ValueError("realtime running checkpoint has an invalid timestamp") from exc
+            if age < max(120.0, float(heartbeat_timeout) * 3): raise RuntimeError("realtime checkpoint is still fresh and cannot be resumed")
+        previous = checkpoint.get("last_run") if isinstance(checkpoint.get("last_run"), dict) else {}
+        previous_run_id = str(previous.get("run_id") or checkpoint.get("run_id") or "")
+        requested = float(previous.get("requested_duration_seconds") or checkpoint.get("requested_duration_seconds") or 0)
+        elapsed = float(previous.get("elapsed_seconds") or 0); remaining = max(0.0, requested - elapsed)
+        symbols = checkpoint.get("symbols") if isinstance(checkpoint.get("symbols"), list) else []
+        if not _valid_run_id(previous_run_id) or not symbols or remaining <= 0: raise ValueError("realtime checkpoint has no resumable duration")
+        chain_id = str(previous.get("session_chain_id") or checkpoint.get("session_chain_id") or previous_run_id)
+        result = self.run([str(value) for value in symbols], max_messages=0, max_reconnects=max_reconnects, heartbeat_timeout=heartbeat_timeout, duration_seconds=remaining, session_chain_id=chain_id, resumed_from_run_id=previous_run_id)
+        result["resume"] = {"resumed": True, "resumed_from_run_id": previous_run_id, "session_chain_id": chain_id, "remaining_duration_seconds": remaining}
+        return result
 
     def _load(self) -> dict[str, Any]:
         path = self.root / "checkpoint.json"
@@ -285,6 +309,10 @@ def _valid_run_evidence(payload: dict[str, Any], path: Path) -> bool:
     run_suffix = run_id.removeprefix("realtime_run_")
     if len(run_suffix) != 32 or any(char not in "0123456789abcdef" for char in run_suffix.lower()) or path.name != f"{run_id}.json":
         return False
+    chain_id = str(run.get("session_chain_id") or run_id)
+    resumed_from = str(run.get("resumed_from_run_id") or "")
+    if not _valid_run_id(chain_id) or (resumed_from and (not _valid_run_id(resumed_from) or resumed_from == run_id)):
+        return False
     try:
         started = datetime.fromisoformat(str(run["started_at"])); finished = datetime.fromisoformat(str(run["finished_at"]))
         if started.tzinfo is None or finished.tzinfo is None or finished < started: return False
@@ -327,6 +355,11 @@ def _valid_run_evidence(payload: dict[str, Any], path: Path) -> bool:
     if payload.get("status") == "COMPLETED" and int(run["data_messages"]) > 0 and not streams:
         return False
     return True
+
+
+def _valid_run_id(value: str) -> bool:
+    suffix = str(value).removeprefix("realtime_run_")
+    return len(suffix) == 32 and all(char in "0123456789abcdef" for char in suffix.lower())
 
 
 def _timestamp(row: dict[str, str], received: datetime) -> str:

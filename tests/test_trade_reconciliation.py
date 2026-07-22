@@ -1314,6 +1314,99 @@ class TradeReconciliationTests(unittest.TestCase):
         self.assertTrue(focus["heavy_research_allowed"])
         self.assertFalse(focus["large_batch_jobs_allowed"])
 
+    def test_market_priority_runtime_contract_detects_stopped_scheduler(self):
+        result = stock_app.build_market_priority_runtime_contract(
+            focus={
+                "market_priority_active": True,
+                "market_phase": "regular",
+                "autopilot_interval_seconds": 60,
+            },
+            scheduler={
+                "running": False,
+                "thread_alive": False,
+                "effective_interval_seconds": 60,
+            },
+            latest_tick_age_seconds=30,
+            resource_gate={"active_heavy_job_count": 0},
+            runtime_age_seconds=600,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("market_priority_degraded", result["status"])
+        self.assertIn("market_scheduler_not_running", result["blockers"])
+        self.assertIn("market_scheduler_thread_dead", result["blockers"])
+        self.assertFalse(result["live_order_allowed"])
+
+    def test_market_priority_runtime_contract_detects_stale_tick_at_181_seconds(self):
+        result = stock_app.build_market_priority_runtime_contract(
+            focus={
+                "market_priority_active": True,
+                "market_phase": "regular",
+                "autopilot_interval_seconds": 60,
+            },
+            scheduler={
+                "running": True,
+                "thread_alive": True,
+                "effective_interval_seconds": 60,
+            },
+            latest_tick_age_seconds=181,
+            resource_gate={"active_heavy_job_count": 0},
+            runtime_age_seconds=600,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(180, result["stale_threshold_seconds"])
+        self.assertIn("market_scheduler_tick_stale", result["blockers"])
+
+    def test_market_priority_runtime_contract_detects_heavy_job_collision(self):
+        result = stock_app.build_market_priority_runtime_contract(
+            focus={
+                "market_priority_active": True,
+                "market_phase": "regular",
+                "autopilot_interval_seconds": 60,
+            },
+            scheduler={
+                "running": True,
+                "thread_alive": True,
+                "effective_interval_seconds": 60,
+            },
+            latest_tick_age_seconds=30,
+            resource_gate={"active_heavy_job_count": 1},
+            runtime_age_seconds=600,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["preemption_required"])
+        self.assertIn("market_priority_heavy_work_still_running", result["blockers"])
+
+    def test_market_priority_runtime_contract_releases_after_market(self):
+        result = stock_app.build_market_priority_runtime_contract(
+            focus={"market_priority_active": False, "market_phase": "closed"},
+            scheduler={
+                "running": False,
+                "thread_alive": False,
+                "effective_interval_seconds": 300,
+            },
+            latest_tick_age_seconds=3600,
+            resource_gate={"active_heavy_job_count": 1},
+            runtime_age_seconds=7200,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("not_required", result["status"])
+        self.assertEqual([], result["blockers"])
+        self.assertFalse(result["preemption_required"])
+
+    def test_market_priority_fault_injection_audit_passes_all_scenarios(self):
+        result = stock_app.build_market_priority_fault_injection_audit()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(5, result["scenario_count"])
+        self.assertEqual(5, result["passed_count"])
+        self.assertEqual(0, result["failed_count"])
+        self.assertTrue(all(row["passed"] for row in result["scenarios"]))
+        self.assertFalse(result["live_order_allowed"])
+
     def test_weekend_allows_large_batch_research(self):
         clock = {"sessions": [{"id": "KR", "is_regular_open": False, "market_time": "2026-07-18T10:00:00+09:00"}]}
         focus = build_operating_focus(clock)
@@ -1838,6 +1931,18 @@ class TradeReconciliationTests(unittest.TestCase):
         market_cycle.assert_called_once_with("daemon", focus)
         self.assertEqual(cycle["status"], "PREMARKET_PRIORITY")
 
+    def test_market_open_manual_cycle_cannot_bypass_resource_priority(self):
+        daemon = AiResearchDaemon()
+        focus = {"market_priority_active": True, "mode": "MARKET_EXECUTION_FOCUS"}
+        with patch("app.stock_suite_app.build_operating_focus", return_value=focus), patch.object(
+            daemon,
+            "_run_market_execution_focus_cycle",
+            return_value={"status": "MARKET_PRIORITY", "source": "manual"},
+        ) as market_cycle:
+            cycle = daemon.run_cycle(source="manual")
+        market_cycle.assert_called_once_with("manual", focus)
+        self.assertEqual(cycle["status"], "MARKET_PRIORITY")
+
     def test_research_startup_delay_defaults_to_market_priority_and_allows_override(self):
         with patch("app.stock_suite_app.build_operating_focus", return_value={"market_priority_active": True}), patch.dict(
             stock_app.os.environ, {}, clear=False
@@ -1936,6 +2041,34 @@ class TradeReconciliationTests(unittest.TestCase):
         fallback.assert_not_called()
         self.assertEqual(review["reviews"], [])
         self.assertTrue(review["confirmed_snapshot_used"])
+
+    def test_position_review_uses_restart_safe_partial_profit_plan(self):
+        position = {
+            "symbol": "005930", "name": "Samsung Electronics", "quantity": 10,
+            "available_quantity": 10, "avg_price": 100_000, "current_price": 104_000,
+            "profit_loss_rate": 4.0, "buy_at": "2026-07-20T09:10:00+09:00",
+        }
+        screener = {
+            "symbol": "005930", "amount": 50_000_000_000, "change_pct": 4.0,
+            "company_quality": {"grade": "A", "score": 80, "blockers": []},
+            "risk_flags": [],
+            "trade_horizon": {"mode": "스윙", "stop_loss_pct": 2.0, "take_profit_pct": 3.0},
+        }
+        with tempfile.TemporaryDirectory() as directory, \
+            patch.object(stock_app.OPS, "data_dir", Path(directory)), \
+            patch("app.stock_suite_app.INTEGRATIONS.kis_account", return_value={"ok": True, "positions": [position]}), \
+            patch("app.stock_suite_app.build_market_session_clock", return_value={"sessions": [{"id": "KR"}]}), \
+            patch("app.stock_suite_app.build_ai_screener", return_value={"candidates": [screener]}), \
+            patch("app.stock_suite_app.fetch_kr_market_rows", return_value=("2026-07-20", [])):
+            review = _delegated_live_position_reviews({
+                "delegated_live_profit_partial_exit_pct": 50,
+                "delegated_live_profit_trailing_drawdown_pct": 1,
+            })
+        decision = review["reviews"][0]
+        self.assertEqual(decision["urgency"], "profit_partial")
+        self.assertEqual(decision["recommended_exit_quantity"], 5)
+        self.assertEqual(decision["exit_scope"], "partial_available_position")
+        self.assertTrue(str(decision["exit_plan_id"]).startswith("EXIT-"))
 
     def test_asset_gear_includes_one_day_move_for_premarket_report(self):
         rows = [{"date": "2026-07-10", "close": 100.0}, {"date": "2026-07-11", "close": 102.0}]
@@ -2057,6 +2190,84 @@ class TradeReconciliationTests(unittest.TestCase):
         execute_ops.assert_called_once()
         quick_query.assert_not_called()
 
+    def test_ai_model_identity_question_uses_fast_truthful_reply(self):
+        with patch(
+            "app.stock_suite_app.load_ai_brain",
+            return_value={"provider": "ollama-gemma", "model": "gemma4:latest"},
+        ), patch("app.stock_suite_app.JOURNAL.add"), patch(
+            "app.stock_suite_app.ask_selected_ai_brain"
+        ) as ai_brain:
+            result = stock_app.execute_agent_command("너 젬마4야?", source="test")
+
+        self.assertTrue(result["ok"])
+        self.assertIn("gemma4:latest", result["reply"])
+        self.assertTrue(result["brain"]["fast_path"])
+        ai_brain.assert_not_called()
+
+    def test_secretary_smalltalk_skips_slow_model_even_when_gemma_is_configured(self):
+        with patch(
+            "app.stock_suite_app.load_ai_brain",
+            return_value={"provider": "ollama-gemma", "model": "gemma4:latest"},
+        ), patch("app.stock_suite_app.JOURNAL.add"), patch(
+            "app.stock_suite_app.ask_selected_ai_brain"
+        ) as ai_brain:
+            result = stock_app.execute_agent_command("안녕", source="test")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["brain"]["fast_path"])
+        self.assertEqual("builtin-fast", result["brain"]["provider"])
+        ai_brain.assert_not_called()
+
+    def test_secretary_uses_light_model_unless_deep_reasoning_is_requested(self):
+        tags = {
+            "ok": True,
+            "models": ["qwen2.5:3b", "qwen2.5:1.5b", "gemma4:latest"],
+        }
+        with patch(
+            "app.stock_suite_app.resolve_ollama_model",
+            return_value={"model": "gemma4:latest", "configured_model": "gemma4:latest", "tags": tags},
+        ):
+            fast = stock_app._resolve_secretary_ollama_model(
+                "gemma4:latest", "http://127.0.0.1:11434", "자유롭게 이야기해줘"
+            )
+            deep = stock_app._resolve_secretary_ollama_model(
+                "gemma4:latest", "http://127.0.0.1:11434", "심층 분석해줘"
+            )
+
+        self.assertEqual("qwen2.5:1.5b", fast["model"])
+        self.assertTrue(fast["fast_secretary"])
+        self.assertEqual("gemma4:latest", deep["model"])
+        self.assertFalse(deep["fast_secretary"])
+
+    def test_ai_mission_report_returns_object_contract(self):
+        daemon_status = {
+            "running": True,
+            "interval_seconds": 300,
+            "memory": {
+                "cycle_count": 4,
+                "historical_replay_memory_count": 2,
+                "knowledge_graph": {"node_count": 3, "edge_count": 2},
+                "top_candidates": [],
+            },
+            "last_cycle": {},
+        }
+        with patch("app.stock_suite_app.AI_DAEMON.status", return_value=daemon_status), patch(
+            "app.stock_suite_app.fetch_kr_market_rows", return_value=("20260717", [])
+        ), patch("app.stock_suite_app.analyze_kr_market", return_value={}), patch(
+            "app.stock_suite_app.analyze_themes_from_rows", return_value=[]
+        ), patch("app.stock_suite_app.build_agent_radar", return_value={}), patch(
+            "app.stock_suite_app.build_ai_screener", return_value={}
+        ), patch("app.stock_suite_app.build_market_session_clock", return_value={}), patch(
+            "app.stock_suite_app.build_ai_pipeline", return_value={"summary": {}}
+        ):
+            report = stock_app.build_ai_mission_report()
+
+        self.assertIsInstance(report, dict)
+        self.assertTrue(report["running"])
+        self.assertEqual(4, report["cycle_count"])
+        self.assertEqual("20260717", report["latest_trading_day"])
+        self.assertIn("task_queue", report)
+
     def test_autotrade_capability_question_reads_policy_instead_of_ai_guess(self):
         status = {
             "flags": {
@@ -2090,6 +2301,39 @@ class TradeReconciliationTests(unittest.TestCase):
         self.assertIn("종목당 최대 15%", result["reply"])
         ai_brain.assert_not_called()
 
+    def test_autotrade_status_poll_never_scans_detailed_ledgers(self):
+        stock_app.AUTOTRADE_STATUS_QUICK_CACHE = None
+        policy = {
+            "delegated_live_autonomy_enabled": False,
+            "paper_autopilot_enabled": True,
+            "live_candidate_enabled": True,
+            "live_pilot_enabled": False,
+            "live_execution_enabled": False,
+            "require_approval": True,
+            "emergency_halt": False,
+            "day_halted": False,
+            "buy_blocked": False,
+        }
+        with patch("app.stock_suite_app.OPS.autotrade_policy", return_value=policy), patch(
+            "app.stock_suite_app.AUTOPILOT_SCHEDULER.status",
+            side_effect=AssertionError("scheduler.status must not run during polling"),
+        ), patch(
+            "app.stock_suite_app.AI_DAEMON.status",
+            side_effect=AssertionError("daemon.status must not run during polling"),
+        ), patch(
+            "app.stock_suite_app.OPS.approvals",
+            side_effect=AssertionError("approval ledger must not run during polling"),
+        ), patch(
+            "app.stock_suite_app.build_today_trade_quick_summary",
+            side_effect=AssertionError("trade ledgers must not run during polling"),
+        ):
+            result = stock_app.build_autotrade_status_quick()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["quick"])
+        self.assertEqual("memory_and_policy_only", result["poll_health"]["profile"])
+        self.assertEqual("ops_status_poll_cache_stabilized", result["server_runtime"]["runtime_marker"])
+
     def test_today_live_buy_symbols_reads_direct_and_nested_symbols(self):
         rows = [
             {"status": "LIVE_SUBMITTED", "side": "BUY", "symbol": "005930"},
@@ -2114,6 +2358,8 @@ class TradeReconciliationTests(unittest.TestCase):
         }
         with patch("app.stock_suite_app._today_live_buy_symbols", return_value={"005930"}), patch(
             "app.stock_suite_app.build_small_account_growth_plan", return_value=plan
+        ), patch(
+            "app.stock_suite_app.latest_intraday_minute_radar_records", return_value=[]
         ), patch("app.stock_suite_app.missed_buy_feedback_live_rows", return_value=[]), patch(
             "app.stock_suite_app.build_market_session_clock", return_value={"sessions": [{"id": "KR", "is_regular_open": True}]}
         ), patch("app.stock_suite_app.today_kst", return_value="2026-07-15"), patch(
@@ -2136,6 +2382,8 @@ class TradeReconciliationTests(unittest.TestCase):
         }
         with patch("app.stock_suite_app._today_live_buy_symbols", return_value=set()), patch(
             "app.stock_suite_app.build_small_account_growth_plan", return_value=stale_plan
+        ), patch(
+            "app.stock_suite_app.latest_intraday_minute_radar_records", return_value=[]
         ), patch("app.stock_suite_app.missed_buy_feedback_live_rows", return_value=[]), patch(
             "app.stock_suite_app.build_market_session_clock", return_value={"sessions": [{"id": "KR", "is_regular_open": True}]}
         ), patch("app.stock_suite_app.today_kst", return_value="2026-07-15"), patch(
@@ -2162,12 +2410,40 @@ class TradeReconciliationTests(unittest.TestCase):
             {"ok": True, "avg_strength": 104.0, "latest_strength": 103.0},
         )
         missing = stock_app._live_buy_strength_gate("BUY", "ai_screener", True, {"ok": False})
+        radar_weak = stock_app._live_buy_strength_gate(
+            "BUY",
+            "intraday_affordable_radar",
+            True,
+            {"ok": True, "avg_strength": 104.9, "latest_strength": 130.0},
+        )
+        radar_strong = stock_app._live_buy_strength_gate(
+            "BUY",
+            "intraday_affordable_radar",
+            True,
+            {"ok": True, "avg_strength": 120.0, "latest_strength": 110.0},
+        )
 
         self.assertFalse(weak["ok"])
         self.assertTrue(weak["required"])
         self.assertTrue(strong["ok"])
         self.assertFalse(missing["ok"])
+        self.assertTrue(radar_weak["required"])
+        self.assertFalse(radar_weak["ok"])
+        self.assertEqual(105.0, radar_weak["threshold"])
+        self.assertTrue(radar_strong["ok"])
         self.assertIn("확인하지 못했습니다", missing["detail"])
+
+    def test_intraday_radar_requires_positive_current_minute_momentum(self):
+        fading = stock_app._live_buy_minute_momentum_gate(
+            "BUY", "intraday_affordable_radar", True, {"ok": True, "momentum_pct": -0.01}
+        )
+        continuing = stock_app._live_buy_minute_momentum_gate(
+            "BUY", "intraday_affordable_radar", True, {"ok": True, "momentum_pct": 0.01}
+        )
+
+        self.assertTrue(fading["required"])
+        self.assertFalse(fading["ok"])
+        self.assertTrue(continuing["ok"])
 
     def test_live_trade_incident_writes_jsonl_and_markdown_once(self):
         payload = {
@@ -2261,6 +2537,41 @@ class TradeReconciliationTests(unittest.TestCase):
         self.assertEqual(result["status"], "DAILY_AUTHORIZATION_EXPIRED")
         position_review.assert_not_called()
         create_candidate.assert_not_called()
+
+    def test_delegated_autonomy_stops_after_dry_submit_for_user_confirmation(self):
+        policy = {
+            "delegated_live_autonomy_enabled": True,
+            "delegated_live_authorization_confirmed": True,
+            "delegated_live_authorized_date": stock_app.today_kst(),
+            "live_pilot_enabled": True,
+            "live_execution_enabled": True,
+            "delegated_live_max_buy_orders_per_day": 2,
+            "delegated_live_max_sell_orders_per_day": 1,
+            "delegated_live_auto_submit_max_cash_pct": 30.0,
+            "live_pilot_max_cash_pct": 15.0,
+            "live_pilot_dynamic_max_cash_pct": 15.0,
+        }
+        ticket = {"approval_token": "approval-1", "symbol": "005930", "quantity": 2}
+        with (
+            patch.object(stock_app.OPS, "autotrade_policy", return_value=policy),
+            patch("app.stock_suite_app._delegated_live_order_counts", return_value={"total": 0, "buy": 0, "sell": 0}),
+            patch("app.stock_suite_app.build_market_session_clock", return_value={"sessions": [{"id": "KR", "is_regular_open": True}]}),
+            patch("app.stock_suite_app._delegated_live_position_reviews", return_value={"reviews": [], "message": ""}),
+            patch("app.stock_suite_app.build_live_reconciliation_audit", return_value={"ok": True, "status": "ready", "summary": "ready"}),
+            patch("app.stock_suite_app.create_live_pilot_candidate", return_value={"ok": True, "ticket": ticket}),
+            patch.object(stock_app.OPS, "resolve_approval", return_value={"status": "approved"}),
+            patch.object(stock_app.OPS, "live_dry_submit", return_value={"status": "LIVE_READY_NOT_SUBMITTED"}),
+            patch.object(stock_app.OPS, "audit"),
+            patch("app.stock_suite_app.submit_live_pilot_order") as submit,
+        ):
+            result = stock_app._run_delegated_live_autonomy_unlocked(source="test")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("FINAL_CONFIRMATION_REQUIRED", result["status"])
+        self.assertTrue(result["final_confirmation"]["required"])
+        self.assertEqual("005930", result["final_confirmation"]["symbol"])
+        self.assertEqual(2, result["final_confirmation"]["quantity"])
+        submit.assert_not_called()
 
     def test_always_on_research_defaults_on_and_allows_explicit_opt_out(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -2718,6 +3029,7 @@ class CommonQuoteSnapshotTests(unittest.TestCase):
                 "name": symbol,
                 "market": "KR",
                 "currency": "KRW",
+                "unit_scale": 1,
                 "price": 100_000.0,
                 "source": "kis_readonly" if prefer_live else "KIS_VERIFIED_CACHE",
                 "verified_quote_age_seconds": age,
@@ -2747,6 +3059,7 @@ class CommonQuoteSnapshotTests(unittest.TestCase):
                 "name": symbol,
                 "market": "KR",
                 "currency": "KRW",
+                "unit_scale": 1,
                 "price": 100_000.0,
                 "source": "KIS_VERIFIED_CACHE",
                 "verified_quote_age_seconds": 0.0 if symbol == "005930" else 600.0,
@@ -2782,6 +3095,96 @@ class CommonQuoteSnapshotTests(unittest.TestCase):
         self.assertFalse(snapshot["rows"][0]["official_mark_eligible"])
         self.assertEqual({}, snapshot["marks"])
         self.assertIn("simulated_fallback_quote", snapshot["rows"][0]["warnings"])
+
+    def test_trusted_quote_without_explicit_unit_contract_is_blocked(self):
+        with patch(
+            "app.stock_suite_app.ops_quote",
+            return_value={
+                "symbol": "005930",
+                "name": "Samsung Electronics",
+                "market": "KR",
+                "currency": "KRW",
+                "price": 100_000,
+                "source": "kis_readonly",
+                "verified_quote_age_seconds": 0.0,
+            },
+        ):
+            snapshot = build_common_quote_snapshot(symbols=["005930"], prefer_live=True)
+
+        self.assertEqual("codexstock_common_quote_snapshot_v2", snapshot["schema"])
+        self.assertFalse(snapshot["rows"][0]["official_mark_eligible"])
+        self.assertEqual("blocked", snapshot["rows"][0]["snapshot_status"])
+        self.assertIn("quote_unit_scale_missing", snapshot["rows"][0]["issues"])
+        self.assertEqual({}, snapshot["marks"])
+
+    def test_live_snapshot_blocks_stale_verified_cache(self):
+        with patch(
+            "app.stock_suite_app.ops_quote",
+            return_value={
+                "symbol": "005930",
+                "name": "Samsung Electronics",
+                "market": "KR",
+                "currency": "KRW",
+                "unit_scale": 1,
+                "price": 100_000,
+                "source": "KIS_VERIFIED_CACHE",
+                "verified_quote_age_seconds": 120.0,
+            },
+        ):
+            snapshot = build_common_quote_snapshot(symbols=["005930"], prefer_live=True)
+
+        self.assertFalse(snapshot["rows"][0]["official_mark_eligible"])
+        self.assertIn("official_quote_stale", snapshot["rows"][0]["issues"])
+        self.assertEqual({}, snapshot["marks"])
+
+    def test_plausible_unknown_source_is_watch_only_not_official(self):
+        with patch(
+            "app.stock_suite_app.ops_quote",
+            return_value={
+                "symbol": "005930",
+                "name": "Samsung Electronics",
+                "market": "KR",
+                "currency": "KRW",
+                "unit_scale": 1,
+                "price": 100_000,
+                "source": "local_cache",
+                "verified_quote_age_seconds": 0.0,
+            },
+        ):
+            snapshot = build_common_quote_snapshot(symbols=["005930"])
+
+        self.assertEqual("watch", snapshot["rows"][0]["snapshot_status"])
+        self.assertFalse(snapshot["rows"][0]["official_mark_eligible"])
+        self.assertIn("untrusted_quote_source_not_eligible", snapshot["rows"][0]["warnings"])
+        self.assertEqual({}, snapshot["marks"])
+
+    def test_official_quote_with_inconsistent_price_fields_is_blocked(self):
+        with patch(
+            "app.stock_suite_app.ops_quote",
+            return_value={
+                "symbol": "005930",
+                "name": "Samsung Electronics",
+                "market": "KR",
+                "currency": "KRW",
+                "unit_scale": 1,
+                "price": 1_000_000,
+                "previous_close": 100_000,
+                "high": 101_000,
+                "low": 99_000,
+                "change_pct": 0.0,
+                "upper_limit_price": 130_000,
+                "lower_limit_price": 70_000,
+                "source": "kis_readonly",
+                "verified_quote_age_seconds": 0.0,
+            },
+        ):
+            snapshot = build_common_quote_snapshot(symbols=["005930"], prefer_live=True)
+
+        row = snapshot["rows"][0]
+        self.assertFalse(row["official_mark_eligible"])
+        self.assertIn("quote_price_outside_daily_range", row["issues"])
+        self.assertIn("quote_above_upper_limit", row["issues"])
+        self.assertIn("quote_change_pct_inconsistent", row["issues"])
 
     def test_trusted_kis_price_above_static_reference_is_not_rescaled(self):
         guard = stock_app.quote_unit_guard(
@@ -2893,6 +3296,108 @@ class PositionUnitAuditTests(unittest.TestCase):
 
 
 class SqliteStorageAuditTests(unittest.TestCase):
+    def test_query_benchmark_uses_median_and_preserves_transient_peak(self):
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
+            with patch(
+                "app.stock_suite_app.time.perf_counter",
+                side_effect=[0.0, 0.6, 1.0, 1.001, 2.0, 2.001],
+            ):
+                result = stock_app._benchmark_sqlite_read_query(
+                    con,
+                    "SELECT id FROM sample",
+                )
+        finally:
+            con.close()
+
+        self.assertEqual(3, result["sample_count"])
+        self.assertEqual(1.0, result["median_ms"])
+        self.assertEqual(600.0, result["max_ms"])
+        self.assertTrue(result["transient_spike"])
+
+    def test_query_benchmark_keeps_persistent_latency_above_slow_threshold(self):
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
+            with patch(
+                "app.stock_suite_app.time.perf_counter",
+                side_effect=[0.0, 0.3, 1.0, 1.3, 2.0, 2.3],
+            ):
+                result = stock_app._benchmark_sqlite_read_query(
+                    con,
+                    "SELECT id FROM sample",
+                )
+        finally:
+            con.close()
+
+        self.assertGreaterEqual(
+            result["median_ms"],
+            stock_app.SQLITE_STORAGE_QUERY_SLOW_MS,
+        )
+        self.assertFalse(result["transient_spike"])
+
+    def test_database_audit_budget_starts_after_discovery_budget(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "events.sqlite3"
+            con = sqlite3.connect(db_path)
+            try:
+                con.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
+                con.commit()
+            finally:
+                con.close()
+            clock = {"value": 0.0}
+
+            def fake_monotonic():
+                current = clock["value"]
+                clock["value"] += 0.001
+                return current
+
+            def finish_discovery(*_args, **_kwargs):
+                clock["value"] = 10.0
+                return [db_path], {
+                    "complete": True,
+                    "truncated_reason": None,
+                    "elapsed_ms": 10000.0,
+                    "directories_scanned": 1,
+                    "excluded_directory_count": 0,
+                    "scope": "active_runtime_databases",
+                    "files_seen": 1,
+                    "discovered_database_count": 1,
+                    "database_limit": stock_app.SQLITE_STORAGE_BOUNDED_MAX_DATABASES,
+                    "time_budget_seconds": stock_app.SQLITE_STORAGE_BOUNDED_DISCOVERY_SECONDS,
+                }
+
+            with (
+                patch("app.stock_suite_app.USER_DATA_ROOT", root),
+                patch("app.stock_suite_app.SQLITE_STORAGE_AUDIT_CACHE_FILE", root / "audit-cache.json"),
+                patch(
+                    "app.stock_suite_app.SQLITE_STORAGE_AUDIT_CACHE",
+                    {"saved_at": 0.0, "scope": "", "payload": {}},
+                ),
+                patch(
+                    "app.stock_suite_app._discover_sqlite_storage_paths",
+                    side_effect=finish_discovery,
+                ),
+                patch(
+                    "app.stock_suite_app._fast_sqlite_storage_snapshot",
+                    return_value={},
+                ),
+                patch(
+                    "app.stock_suite_app.time.monotonic",
+                    side_effect=fake_monotonic,
+                ),
+            ):
+                result = _sqlite_storage_feature_probe(
+                    full_integrity=False,
+                    force=True,
+                )
+
+        self.assertEqual(1, result["opened_database_count"])
+        self.assertEqual(0, result["deferred_database_count"])
+        self.assertTrue(result["bounded_audit_complete"])
+
     def test_bounded_probe_defers_full_duplicate_and_row_count_scans(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2929,7 +3434,7 @@ class SqliteStorageAuditTests(unittest.TestCase):
                     {"saved_at": 0.0, "scope": "", "payload": {}},
                 ),
             ):
-                bounded = _sqlite_storage_feature_probe(full_integrity=False)
+                bounded = _sqlite_storage_feature_probe(full_integrity=False, force=True)
                 full = _sqlite_storage_feature_probe(full_integrity=True)
 
         bounded_db = bounded["databases"][0]
@@ -2937,9 +3442,167 @@ class SqliteStorageAuditTests(unittest.TestCase):
         self.assertIsNone(bounded_db["duplicate_payload_rows"])
         self.assertEqual("deferred_to_full_audit", bounded_db["duplicate_payload_check_mode"])
         self.assertEqual({}, bounded_db["table_row_counts"])
+        self.assertTrue(bounded_db["storage_concurrency_safe"])
+        self.assertFalse(bounded_db["busy_timeout_affects_storage_health"])
         self.assertEqual(0, full_db["duplicate_payload_rows"])
         self.assertEqual(2, full_db["table_row_counts"]["jsonl_events"])
         self.assertEqual("ok", full_db["quick_check"])
+
+    def test_cold_probe_returns_metadata_while_background_audit_starts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sqlite3.connect(root / "events.sqlite3").close()
+            with (
+                patch("app.stock_suite_app.USER_DATA_ROOT", root),
+                patch("app.stock_suite_app.load_probe_cache", side_effect=[None, None]),
+                patch(
+                    "app.stock_suite_app._start_sqlite_storage_audit_refresh",
+                    return_value=True,
+                ) as refresh,
+            ):
+                result = _sqlite_storage_feature_probe(full_integrity=False)
+
+        refresh.assert_called_once_with()
+        self.assertEqual("background_audit_pending", result["status"])
+        self.assertEqual(1, result["sqlite_file_count"])
+        self.assertTrue(result["refreshing"])
+        self.assertEqual(
+            "initial_inventory_then_background_bounded_audit",
+            result["health_probe_mode"],
+        )
+
+    def test_forced_refresh_response_never_runs_database_probe_inline(self):
+        cached = {"ok": True, "status": "ready", "summary": {"status": "ready"}}
+        with (
+            patch(
+                "app.stock_suite_app._start_sqlite_storage_audit_refresh",
+                return_value=True,
+            ),
+            patch(
+                "app.stock_suite_app._fast_sqlite_storage_snapshot",
+                return_value=cached,
+            ),
+            patch(
+                "app.stock_suite_app._sqlite_storage_feature_probe",
+                side_effect=AssertionError("HTTP refresh must not run a database audit inline"),
+            ),
+        ):
+            result = stock_app._sqlite_storage_refresh_response()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["refreshing"])
+        self.assertEqual("cached_while_bounded_audit_refreshes", result["health_probe_mode"])
+
+    def test_vacuum_recommendation_is_maintenance_not_storage_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "maintenance.sqlite3"
+            con = sqlite3.connect(db_path)
+            try:
+                con.execute("CREATE TABLE payloads (id INTEGER PRIMARY KEY, body BLOB)")
+                con.execute("INSERT INTO payloads(body) VALUES (zeroblob(12582912))")
+                con.commit()
+                con.execute("DELETE FROM payloads")
+                con.commit()
+            finally:
+                con.close()
+            with (
+                patch("app.stock_suite_app.USER_DATA_ROOT", root),
+                patch("app.stock_suite_app.SQLITE_STORAGE_AUDIT_CACHE_FILE", root / "audit-cache.json"),
+                patch(
+                    "app.stock_suite_app.SQLITE_STORAGE_AUDIT_CACHE",
+                    {"saved_at": 0.0, "scope": "", "payload": {}},
+                ),
+            ):
+                result = _sqlite_storage_feature_probe(full_integrity=False, force=True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("ready_large_healthy", result["status"])
+        self.assertEqual(0, result["problem_sqlite_count"])
+        self.assertEqual(1, result["maintenance_advisory_count"])
+
+    def test_bounded_discovery_skips_cold_archives_but_keeps_active_databases(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            active_dir = root / "ops" / "execution_sidecar"
+            archive_dir = root / "backups" / "old-runtime"
+            active_dir.mkdir(parents=True)
+            archive_dir.mkdir(parents=True)
+            active_db = active_dir / "ledger.sqlite3"
+            archived_db = archive_dir / "ledger.sqlite3"
+            active_db.touch()
+            archived_db.touch()
+
+            paths, discovery = stock_app._discover_sqlite_storage_paths(
+                root,
+                full_integrity=False,
+            )
+
+        self.assertEqual([active_db], paths)
+        self.assertTrue(discovery["complete"])
+        self.assertEqual("active_runtime_databases", discovery["scope"])
+        self.assertGreaterEqual(discovery["excluded_directory_count"], 1)
+
+    def test_bounded_audit_reuses_unchanged_verified_database_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for name in ("first.sqlite3", "second.sqlite3"):
+                con = sqlite3.connect(root / name)
+                con.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
+                con.commit()
+                con.close()
+            cache_file = root / "audit-cache.json"
+            with (
+                patch("app.stock_suite_app.USER_DATA_ROOT", root),
+                patch("app.stock_suite_app.SQLITE_STORAGE_AUDIT_CACHE_FILE", cache_file),
+                patch(
+                    "app.stock_suite_app.SQLITE_STORAGE_AUDIT_CACHE",
+                    {"saved_at": 0.0, "scope": "", "payload": {}},
+                ),
+            ):
+                first = _sqlite_storage_feature_probe(full_integrity=False, force=True)
+                persisted = stock_app._fast_sqlite_storage_snapshot(
+                    max_age_seconds=7 * 24 * 60 * 60
+                )
+                self.assertEqual(2, len(persisted["database_catalog"]))
+                with (
+                    patch(
+                        "app.stock_suite_app._fast_sqlite_storage_snapshot",
+                        return_value=persisted,
+                    ),
+                    patch(
+                        "app.stock_suite_app.sqlite3.connect",
+                        side_effect=AssertionError(
+                            "unchanged verified databases must be reused"
+                        ),
+                    ),
+                ):
+                    second = _sqlite_storage_feature_probe(
+                        full_integrity=False,
+                        force=True,
+                    )
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(2, second["reused_database_count"])
+        self.assertEqual(0, second["opened_database_count"])
+        self.assertTrue(second["bounded_audit_complete"])
+        self.assertTrue(all(row["audit_reused"] for row in second["database_catalog"]))
+
+    def test_bounded_discovery_reports_database_limit_instead_of_hiding_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(stock_app.SQLITE_STORAGE_BOUNDED_MAX_DATABASES + 2):
+                (root / f"db-{index:03d}.sqlite3").touch()
+
+            paths, discovery = stock_app._discover_sqlite_storage_paths(
+                root,
+                full_integrity=False,
+            )
+
+        self.assertEqual(stock_app.SQLITE_STORAGE_BOUNDED_MAX_DATABASES, len(paths))
+        self.assertFalse(discovery["complete"])
+        self.assertEqual("database_count_budget_exceeded", discovery["truncated_reason"])
 
 
 class FeatureHealthClassificationTests(unittest.TestCase):
@@ -2984,6 +3647,57 @@ class FeatureHealthClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual("degraded", result["status"])
+
+    def test_domain_attention_is_not_misclassified_as_feature_failure(self):
+        result = stock_app._feature_health_probe(
+            "sector_concentration",
+            "Sector concentration",
+            "risk",
+            "/api/agent/sector-concentration",
+            lambda: {
+                "ok": False,
+                "status": "review_required",
+                "summary": {"status": "review_required"},
+                "domain_attention": True,
+                "domain_attention_label": "업종 편중 검토 필요",
+                "domain_attention_reason": "반도체 후보 비중 80%",
+            },
+            "Cap crowded sectors before promotion.",
+            degraded_statuses={"no_cache"},
+            domain_attention_statuses={"review_required"},
+        )
+
+        self.assertEqual("alive", result["status"])
+        self.assertTrue(result["metadata"]["domain_attention"])
+        self.assertEqual("review_required", result["metadata"]["domain_status"])
+        self.assertEqual("Cap crowded sectors before promotion.", result["action"])
+        self.assertEqual("normal", stock_app._feature_health_operational_state(result)[0])
+
+    def test_probe_preserves_mcp_exposure_reconciliation_metadata(self):
+        client_exposure = {
+            "status": "MISMATCH",
+            "core_exposure_status": "CORE_MATCHED",
+        }
+        reconciliation = {
+            "full_surface_status": "MISMATCH",
+            "core_surface_status": "CORE_MATCHED",
+            "next_action": "REFRESH_CONNECTOR_SCHEMA_AND_RESUBMIT_RECEIPT",
+        }
+        result = stock_app._feature_health_probe(
+            "mcp_manifest",
+            "MCP manifest/tools",
+            "mcp",
+            "mcp://codexstock_mcp_manifest",
+            lambda: {
+                "ok": True,
+                "status": "ready",
+                "client_exposure": client_exposure,
+                "exposure_reconciliation": reconciliation,
+            },
+        )
+
+        self.assertEqual(client_exposure, result["metadata"]["client_exposure"])
+        self.assertEqual(reconciliation, result["metadata"]["exposure_reconciliation"])
 
     def test_autopilot_health_excludes_expired_pending_approvals(self):
         expired = {
@@ -3538,6 +4252,56 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
             [row["code"] for row in summary["blockers"]],
         )
 
+    def test_live_reconciliation_certificate_separates_fill_from_account_and_pnl_proof(self):
+        buy = {
+            "date": "2026-07-15",
+            "order_no": "B-1",
+            "symbol": "005930",
+            "side": "BUY",
+            "submitted_quantity": 1,
+            "broker_quantity": 1,
+            "avg_price": 71000,
+            "reconciliation": "matched",
+            "official_trade_eligible": True,
+            "official_performance_eligible": False,
+            "learning_eligible": False,
+            "account_ledger_reconciliation": {"status": "matched"},
+        }
+        sell = {
+            "date": "2026-07-16",
+            "order_no": "S-1",
+            "symbol": "005930",
+            "side": "SELL",
+            "submitted_quantity": 1,
+            "broker_quantity": 1,
+            "avg_price": 72000,
+            "reconciliation": "matched",
+            "official_trade_eligible": False,
+            "official_performance_eligible": False,
+            "learning_eligible": False,
+            "account_ledger_reconciliation": {"status": "incomplete_evidence"},
+        }
+        certificate = stock_app._live_reconciliation_evidence_certificate(
+            submitted=[buy, sell],
+            matched=[buy, sell],
+            partial=[],
+            pending=[],
+            account_matched=[buy],
+            account_mismatched=[],
+            account_incomplete=[sell],
+            unmatched_broker_events=[],
+        )
+
+        self.assertEqual(100.0, certificate["order_fill_coverage_pct"])
+        self.assertEqual(50.0, certificate["account_ledger_coverage_pct"])
+        self.assertEqual(0.0, certificate["sell_pnl_coverage_pct"])
+        self.assertTrue(certificate["global_order_fill_complete"])
+        self.assertFalse(certificate["global_account_ledger_complete"])
+        self.assertFalse(certificate["global_sell_pnl_complete"])
+        self.assertFalse(certificate["global_history_complete"])
+        self.assertTrue(certificate["evidence_sha256"].startswith("sha256:"))
+        self.assertFalse(certificate["live_order_allowed"])
+
     def test_live_reconciliation_blocker_summary_blocks_next_order_with_reason_counts(self):
         summary = _live_reconciliation_blocker_summary(
             order_number_mismatches=[],
@@ -3631,6 +4395,25 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertEqual("[MCP-REDACTED]", mcp_server.REDACTED)
         self.assertEqual("[MCP-MONEY-REDACTED]", mcp_server.REDACTED_MONEY)
         self.assertNotRegex(mcp_server.REDACTED + mcp_server.REDACTED_MONEY, r"[留湲덉]")
+
+    def test_mcp_money_mask_preserves_evaluation_schedule_metadata(self):
+        import app.codexstock_mcp_server as mcp_server
+
+        safe = mcp_server._sanitize_for_mcp(
+            {
+                "first_eligible_evaluation_date": "2026-11-30",
+                "days_until_final_ab_evaluation": 133,
+                "evaluation_amount": 255_000,
+                "valuation_price": 98_000,
+                "profit_loss_rate": 3.2,
+            }
+        )
+
+        self.assertEqual("2026-11-30", safe["first_eligible_evaluation_date"])
+        self.assertEqual(133, safe["days_until_final_ab_evaluation"])
+        self.assertTrue(str(safe["evaluation_amount"]).startswith(mcp_server.REDACTED_MONEY))
+        self.assertTrue(str(safe["valuation_price"]).startswith(mcp_server.REDACTED_MONEY))
+        self.assertEqual(3.2, safe["profit_loss_rate"])
 
     def test_mcp_preserves_uppercase_diagnostic_status_while_redacting_secrets(self):
         import app.codexstock_mcp_server as mcp_server
@@ -3747,6 +4530,62 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertEqual(exposure["missing_on_client"], exposure["filtered_tool_names"])
         self.assertEqual(exposure["server_schema_sha256"], exposure["server_manifest_hash"])
         self.assertEqual(64, len(manifest["server_schema_sha256"]))
+        self.assertEqual("CORE_MISMATCH", exposure["core_exposure_status"])
+        self.assertGreater(exposure["core_missing_on_client_count"], 0)
+        self.assertEqual(
+            "REFRESH_CONNECTOR_SCHEMA_AND_RESUBMIT_RECEIPT",
+            exposure["reconciliation"]["next_action"],
+        )
+
+    def test_mcp_manifest_distinguishes_core_match_from_full_surface_mismatch(self):
+        import app.codexstock_mcp_server as mcp_server
+
+        with patch.dict(
+            mcp_server.os.environ,
+            {
+                "CODEXSTOCK_MCP_EXPOSED_TOOL_NAMES": json.dumps(
+                    list(mcp_server.MCP_CORE_TOOL_NAMES)
+                )
+            },
+            clear=True,
+        ):
+            manifest = mcp_server._mcp_manifest()
+
+        exposure = manifest["client_exposure"]
+        self.assertEqual(20, manifest["core_tool_count"])
+        self.assertEqual([], manifest["undeclared_core_tools"])
+        self.assertEqual("MISMATCH", exposure["status"])
+        self.assertEqual("CORE_MATCHED", exposure["core_exposure_status"])
+        self.assertEqual(100.0, exposure["core_coverage_pct"])
+        self.assertEqual([], exposure["core_missing_on_client"])
+        self.assertTrue(exposure["core_tool_name_set_match"])
+        self.assertTrue(
+            exposure["reconciliation"]["automatically_reconciled_on_manifest_call"]
+        )
+
+    def test_mcp_manifest_reports_own_runtime_source_freshness(self):
+        import app.codexstock_mcp_server as mcp_server
+
+        current = mcp_server._mcp_manifest()["runtime_source"]
+        self.assertEqual("current", current["status"])
+        self.assertFalse(current["restart_required"])
+        self.assertEqual(
+            current["loaded_source_sha256"],
+            current["current_source_sha256"],
+        )
+        self.assertTrue(current["read_only"])
+        self.assertFalse(current["live_order_allowed"])
+
+        with patch.object(mcp_server, "MCP_SOURCE_LOADED_STAT", (0, 0)), patch.object(
+            mcp_server,
+            "MCP_SOURCE_LOADED_SHA256",
+            "0" * 64,
+        ):
+            stale = mcp_server._mcp_manifest()["runtime_source"]
+
+        self.assertEqual("restart_required", stale["status"])
+        self.assertTrue(stale["source_changed_since_process_start"])
+        self.assertTrue(stale["restart_required"])
 
     def test_mcp_exposes_tools_only_with_valid_object_input_schemas(self):
         import app.codexstock_mcp_server as mcp_server
@@ -3817,6 +4656,8 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertTrue(exposure["schema_hash_match"])
         self.assertEqual(server_hash, exposure["exposed_schema_hash"])
         self.assertEqual("2026-07-18T09:00:00+09:00", exposure["last_schema_refresh_at"])
+        self.assertEqual("CORE_MATCHED", exposure["core_exposure_status"])
+        self.assertEqual("NONE", exposure["reconciliation"]["next_action"])
 
     def test_mcp_manifest_persists_and_reuses_client_exposure_receipt(self):
         import app.codexstock_mcp_server as mcp_server
@@ -3849,6 +4690,52 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertEqual("chatgpt-connector", exposure["client_name"])
         self.assertEqual(len(mcp_server.TOOLS), exposure["client_exposed_tool_count"])
 
+    def test_mcp_manifest_reconciles_connector_truncated_tool_aliases(self):
+        import app.codexstock_mcp_server as mcp_server
+
+        canonical_name = "codexstock_internal_developer_readonly_diagnostics"
+        connector_name = "codexstock_internal_developer_1cf8eb3c4dc1"
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt_path = Path(tmp) / "client_exposure_receipt.json"
+            with patch.object(
+                mcp_server,
+                "_mcp_client_exposure_receipt_path",
+                return_value=receipt_path,
+            ), patch.dict(mcp_server.os.environ, {}, clear=True):
+                server_hash = mcp_server._mcp_manifest()["server_schema_sha256"]
+                client_names = [
+                    tool["name"]
+                    for tool in mcp_server.TOOLS
+                    if tool["name"] != canonical_name
+                ]
+                client_names.append(f"{connector_name}=>{canonical_name}")
+                receipt = mcp_server._record_mcp_client_exposure(
+                    {
+                        "client_name": "codex-desktop-connector",
+                        "client_tool_names": client_names,
+                        "client_schema_sha256": server_hash,
+                        "client_observed_at": "2026-07-20T00:45:00+09:00",
+                    }
+                )
+                manifest = mcp_server._mcp_manifest()
+
+        self.assertIsNotNone(receipt)
+        self.assertIn(connector_name, receipt["client_tool_names"])
+        self.assertNotIn(canonical_name, receipt["client_tool_names"])
+        self.assertIn(canonical_name, receipt["client_resolved_tool_names"])
+        exposure = manifest["client_exposure"]
+        self.assertEqual("MATCHED", exposure["status"])
+        self.assertTrue(exposure["client_tool_aliases_applied"])
+        self.assertEqual(1, exposure["client_tool_alias_count"])
+        self.assertEqual([], exposure["missing_on_client"])
+        self.assertEqual([], exposure["unknown_on_client"])
+        self.assertEqual("CORE_MATCHED", exposure["core_exposure_status"])
+        self.assertEqual("NONE", exposure["reconciliation"]["next_action"])
+        self.assertEqual(
+            "codexstock.mcp-exposure-reconciliation.v3",
+            exposure["reconciliation"]["schema"],
+        )
+
     def test_mcp_manifest_quarantines_stale_subset_receipt_instead_of_reusing_it(self):
         import app.codexstock_mcp_server as mcp_server
 
@@ -3879,12 +4766,15 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
 
         self.assertFalse(active_exists)
         self.assertTrue(stale_exists)
-        self.assertEqual("MISMATCH", exposure["status"])
-        self.assertEqual("REFRESH_REQUIRED", exposure["client_cache_status"])
+        self.assertEqual("CLIENT_EXPOSURE_UNOBSERVED", exposure["status"])
+        self.assertEqual("OBSERVATION_REQUIRED", exposure["client_cache_status"])
         self.assertIsNone(exposure["client_cached_tool_count"])
         self.assertEqual(1, exposure["last_observed_stale_tool_count"])
         self.assertTrue(exposure["stale_observation_quarantined"])
         self.assertTrue(exposure["client_observation_required"])
+        self.assertEqual([], exposure["missing_on_client"])
+        self.assertEqual("CLIENT_EXPOSURE_UNOBSERVED", exposure["core_exposure_status"])
+        self.assertEqual("REPORT_CLIENT_TOOL_SURFACE", exposure["reconciliation"]["next_action"])
         self.assertEqual("quarantined_stale_client_receipt", exposure["observation_source"])
         self.assertEqual(1, repeated_exposure["last_observed_stale_tool_count"])
         self.assertEqual(
@@ -3948,6 +4838,118 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertTrue(payload["paper_only"])
         self.assertFalse(payload["live_order_allowed"])
         self.assertFalse(payload["automatic_promotion"])
+
+    def test_mcp_weakness_force_requests_background_refresh(self):
+        import app.codexstock_mcp_server as mcp_server
+
+        with patch.object(
+            mcp_server,
+            "_http_json",
+            return_value={
+                "ok": True,
+                "refresh_requested": True,
+                "refreshing": True,
+                "live_order_allowed": False,
+            },
+        ) as http_json:
+            result = mcp_server._call_tool(
+                "codexstock_weakness_completion_audit",
+                {"force": True},
+            )
+
+        http_json.assert_called_once_with(
+            "GET",
+            "/api/codexstock/weakness-completion-audit",
+            {"refresh": 1},
+        )
+        payload = json.loads(result["content"][0]["text"])
+        self.assertTrue(payload["request_succeeded"])
+        self.assertTrue(payload["cache"]["refresh_requested"])
+        self.assertTrue(payload["cache"]["refreshing"])
+        self.assertTrue(payload["summary_only"])
+        self.assertFalse(payload["live_order_allowed"])
+
+    def test_mcp_weakness_read_uses_cached_status_without_forcing_refresh(self):
+        import app.codexstock_mcp_server as mcp_server
+
+        with patch.object(
+            mcp_server,
+            "_http_json",
+            return_value={"ok": True, "refresh_requested": False},
+        ) as http_json:
+            mcp_server._call_tool(
+                "codexstock_weakness_completion_audit",
+                {"force": False},
+            )
+
+        http_json.assert_called_once_with(
+            "GET",
+            "/api/codexstock/weakness-completion-audit",
+            {"force": 0},
+        )
+
+    def test_mcp_weakness_summary_preserves_progress_and_blockers_without_raw_evidence(self):
+        import app.codexstock_mcp_server as mcp_server
+
+        summary = mcp_server._weakness_completion_audit_summary(
+            {
+                "ok": False,
+                "schema": "codexstock_weakness_completion_audit_v1",
+                "status": "verification_pending",
+                "summary": {
+                    "implementation_label": "10/10 (100%)",
+                    "evidence_label": "9/10 (90%)",
+                },
+                "items": [
+                    {
+                        "id": 5,
+                        "title": "learning",
+                        "implementation_verified": True,
+                        "current_evidence_passed": False,
+                        "status": "verification_pending",
+                        "blockers": ["forward_evidence_pending"],
+                        "evidence": {"raw_rows": [1] * 1000},
+                    }
+                ],
+                "objective_scope": {
+                    "track_count": 1,
+                    "system_ready_count": 1,
+                    "system_progress_pct": 100.0,
+                    "current_outcome_passed_count": 0,
+                    "current_outcome_progress_pct": 0.0,
+                    "tracks": [
+                        {
+                            "id": "forward",
+                            "label": "forward proof",
+                            "system_ready": True,
+                            "current_outcome_passed": False,
+                            "completion_requirement": "time_evidence",
+                            "detail": {"blockers": ["90_days_pending"]},
+                        }
+                    ],
+                },
+                "pending_evidence_summary": [
+                    {
+                        "id": 5,
+                        "next_eligible_date": "2026-09-21",
+                        "operator_message": "wait for evidence",
+                        "large_raw_detail": [1] * 1000,
+                    }
+                ],
+                "collector_errors": {},
+                "refresh_requested": True,
+                "refreshing": True,
+                "live_order_allowed": False,
+            }
+        )
+
+        self.assertEqual("10/10 (100%)", summary["summary"]["implementation_label"])
+        self.assertEqual(["forward_evidence_pending"], summary["items"][0]["blockers"])
+        self.assertNotIn("evidence", summary["items"][0])
+        self.assertEqual("2026-09-21", summary["pending_evidence_summary"][0]["next_eligible_date"])
+        self.assertNotIn("large_raw_detail", summary["pending_evidence_summary"][0])
+        self.assertTrue(summary["cache"]["refresh_requested"])
+        self.assertFalse(summary["live_order_allowed"])
 
     def test_mcp_staff_learning_counterfactual_triplet_batch_is_paper_only_endpoint(self):
         import app.codexstock_mcp_server as mcp_server
@@ -4336,19 +5338,190 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         coverage = stock_app._feature_surface_coverage_contract(result)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(132, result["ui_button_count"])
+        self.assertEqual(133, result["ui_button_count"])
         self.assertEqual(result["ui_button_count"], result["ui_button_bound_count"])
         self.assertEqual(0, result["ui_button_unbound_count"])
         self.assertGreaterEqual(result["ui_api_call_count"], 100)
         self.assertEqual(0, result["ui_api_missing_count"])
-        self.assertEqual(170, result["mcp_tool_count"])
+        self.assertEqual(185, result["mcp_tool_count"])
         self.assertEqual(result["mcp_tool_count"], result["mcp_tool_handled_count"])
         self.assertEqual(0, result["mcp_tool_unhandled_count"])
         self.assertTrue(coverage["ok"])
         self.assertEqual(100.0, coverage["coverage_pct"])
         self.assertEqual(coverage["covered_count"], coverage["total_count"])
+        self.assertEqual("structural_wiring", coverage["coverage_kind"])
+        self.assertFalse(coverage["runtime_execution_verified"])
+        self.assertTrue(coverage["runtime_evidence_required_separately"])
         self.assertTrue(coverage["audit_only"])
         self.assertFalse(coverage["live_order_allowed"])
+
+    def test_runtime_execution_evidence_does_not_overstate_static_coverage(self):
+        checks = [
+            {
+                "id": "recent",
+                "endpoint": "/api/recent",
+                "mcp_tool": "codexstock_recent",
+                "operational_state": "normal",
+                "last_success_at": "2026-07-19T09:00:00+09:00",
+                "last_success_age_seconds": 10,
+            },
+            {
+                "id": "stale",
+                "endpoint": "/api/stale",
+                "operational_state": "delayed",
+                "last_success_at": "2026-07-17T09:00:00+09:00",
+                "last_success_age_seconds": 172_800,
+            },
+            {
+                "id": "never",
+                "mcp_tool": "codexstock_never",
+                "operational_state": "verification_pending",
+                "last_success_at": "",
+            },
+        ]
+        evidence = stock_app._feature_runtime_execution_evidence(
+            checks,
+            {"total_count": 420},
+        )
+
+        self.assertEqual("bounded_health_probes_only", evidence["scope"])
+        self.assertEqual(3, evidence["monitored_check_count"])
+        self.assertEqual(1, evidence["recent_success_count"])
+        self.assertEqual(1, evidence["stale_success_count"])
+        self.assertEqual(1, evidence["never_verified_count"])
+        self.assertEqual(2, evidence["current_issue_count"])
+        self.assertEqual(420, evidence["structural_surface_total_count"])
+        self.assertFalse(evidence["all_structural_features_runtime_verified"])
+        self.assertFalse(evidence["live_order_allowed"])
+
+    def test_surface_runtime_smoke_executes_only_curated_read_only_contracts(self):
+        def payload_for(contract):
+            expected = dict(contract.get("expected_values") or {})
+            boolean_keys = set(contract.get("boolean_keys") or ())
+            payload = {}
+            for key in contract.get("required_keys") or ():
+                if key in expected:
+                    payload[key] = expected[key]
+                elif key in boolean_keys:
+                    payload[key] = True
+                elif key in {
+                    "scheduler",
+                    "daemon",
+                    "operational_counts",
+                    "counts",
+                    "workflow",
+                    "runtime_process",
+                    "candidate_pipeline",
+                    "summary",
+                    "employee",
+                    "app",
+                    "system",
+                }:
+                    payload[key] = {}
+                elif key == "engines":
+                    payload[key] = []
+                elif key.endswith("_count") or key in {"total", "indexed_documents"}:
+                    payload[key] = 1
+                else:
+                    payload[key] = f"test-{key}"
+            return {"status_code": 200, "payload": payload}
+
+        api_by_path = {
+            str(contract["path"]): contract
+            for contract in stock_app.SURFACE_RUNTIME_API_SMOKE_CONTRACTS
+        }
+        mcp_by_tool = {
+            str(contract["tool"]): contract
+            for contract in stock_app.SURFACE_RUNTIME_MCP_SMOKE_CONTRACTS
+        }
+        called_paths = []
+        called_tools = []
+
+        def api_fetcher(path, timeout):
+            called_paths.append((path, timeout))
+            return payload_for(api_by_path[path])
+
+        def mcp_caller(tool, arguments):
+            called_tools.append((tool, dict(arguments)))
+            return payload_for(mcp_by_tool[tool])
+
+        result = stock_app._run_surface_runtime_smoke(
+            base_url="http://127.0.0.1:8765",
+            api_fetcher=api_fetcher,
+            mcp_caller=mcp_caller,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("ready", result["status"])
+        self.assertEqual(11, result["api_total_count"])
+        self.assertEqual(11, result["api_passed_count"])
+        self.assertEqual(6, result["mcp_total_count"])
+        self.assertEqual(6, result["mcp_passed_count"])
+        self.assertEqual(17, result["passed_count"])
+        self.assertEqual(0, result["failed_count"])
+        self.assertEqual(11, len(called_paths))
+        self.assertEqual(6, len(called_tools))
+        self.assertTrue(all(path.startswith("/api/") for path, _ in called_paths))
+        self.assertFalse(any("order" in tool or "submit" in tool for tool, _ in called_tools))
+        self.assertFalse(result["safety_contract"]["mutation_allowed"])
+        self.assertFalse(result["safety_contract"]["live_order_allowed"])
+        self.assertFalse(result["all_structural_features_runtime_verified"])
+
+    def test_surface_runtime_smoke_reports_response_schema_break_without_payload_leak(self):
+        api_contracts = {
+            str(contract["path"]): contract
+            for contract in stock_app.SURFACE_RUNTIME_API_SMOKE_CONTRACTS
+        }
+        mcp_contracts = {
+            str(contract["tool"]): contract
+            for contract in stock_app.SURFACE_RUNTIME_MCP_SMOKE_CONTRACTS
+        }
+
+        def minimal_payload(contract):
+            expected = dict(contract.get("expected_values") or {})
+            boolean_keys = set(contract.get("boolean_keys") or ())
+            payload = {}
+            for key in contract.get("required_keys") or ():
+                payload[key] = (
+                    expected[key]
+                    if key in expected
+                    else True
+                    if key in boolean_keys
+                    else 0
+                    if key.endswith("_count") or key == "total"
+                    else {}
+                    if key in {"scheduler", "daemon", "operational_counts", "counts", "workflow", "runtime_process", "candidate_pipeline", "summary", "employee", "app", "system"}
+                    else []
+                    if key == "engines"
+                    else "value"
+                )
+            return payload
+
+        def api_fetcher(path, timeout):
+            payload = minimal_payload(api_contracts[path])
+            if path == "/api/runtime/deployment-freshness":
+                payload.pop("restart_required", None)
+                payload["private_token"] = "must-not-be-persisted"
+            return {"status_code": 200, "payload": payload}
+
+        def mcp_caller(tool, arguments):
+            return {"status_code": 200, "payload": minimal_payload(mcp_contracts[tool])}
+
+        result = stock_app._run_surface_runtime_smoke(
+            base_url="http://127.0.0.1:8765",
+            api_fetcher=api_fetcher,
+            mcp_caller=mcp_caller,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("contract_failure", result["status"])
+        self.assertEqual(1, result["failed_count"])
+        self.assertEqual(["deployment_freshness"], result["failed_ids"])
+        failed = next(row for row in result["evidence"] if row["id"] == "deployment_freshness")
+        self.assertEqual(["restart_required"], failed["missing_keys"])
+        self.assertNotIn("private_token", json.dumps(result, ensure_ascii=False))
+        self.assertTrue(failed["redacted_evidence_only"])
+        self.assertFalse(result["live_order_allowed"])
 
     def test_feature_health_lifecycle_keeps_last_success_and_classifies_states(self):
         previous_at = "2026-07-13T09:00:00+09:00"
@@ -4480,6 +5653,162 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertFalse(contract["ok"])
         self.assertGreater(contract["missing_field_count"], 0)
         self.assertIn("operational_state_label", contract["missing_by_id"]["api_without_display"])
+
+    def test_feature_health_summary_uses_operational_states_not_raw_liveness(self):
+        checks = [
+            {"id": "ready", "status": "alive", "category": "api", "operational_state": "normal"},
+            {"id": "slow", "status": "alive", "category": "api", "operational_state": "delayed"},
+            {
+                "id": "pending",
+                "status": "alive",
+                "category": "contract",
+                "operational_state": "verification_pending",
+            },
+        ]
+        payload = {
+            "status": "alive",
+            "alive_count": 3,
+            "degraded_count": 0,
+            "summary": {"counts": {"alive": 3, "degraded": 0, "broken": 0, "unknown": 0}},
+            "checks": checks,
+        }
+
+        result = stock_app._synchronize_feature_health_operational_summary(payload, checks)
+
+        self.assertEqual(3, result["alive_count"])
+        self.assertEqual(1, result["normal_count"])
+        self.assertEqual(1, result["delayed_count"])
+        self.assertEqual(1, result["verification_pending_count"])
+        self.assertEqual(2, result["degraded_count"])
+        self.assertEqual("degraded", result["status"])
+        self.assertEqual(
+            "전체 3개 · 정상 1 · 지연 1 · 검증대기 1 · 고장 0",
+            result["health_line_plain"],
+        )
+        self.assertEqual(3, sum(result["operational_counts"].values()))
+
+    def test_system_feature_health_marks_alive_but_delayed_row_as_attention(self):
+        board = {
+            "generated_at": "2026-07-19T18:40:00+09:00",
+            "checked_count": 2,
+            "alive_count": 2,
+            "liveness_degraded_count": 0,
+            "liveness_broken_count": 0,
+            "operational_counts": {
+                "normal": 1,
+                "delayed": 1,
+                "verification_pending": 0,
+                "broken": 0,
+            },
+            "summary": {"counts": {"alive": 2, "degraded": 0, "broken": 0, "unknown": 0}},
+            "checks": [
+                {
+                    "id": "ready",
+                    "status": "alive",
+                    "operational_state": "normal",
+                    "operational_state_label": "정상",
+                },
+                {
+                    "id": "slow",
+                    "status": "alive",
+                    "operational_state": "delayed",
+                    "operational_state_label": "지연",
+                },
+            ],
+        }
+        with patch("app.stock_suite_app.build_feature_health_board", return_value=board):
+            result = build_system_feature_health(compact=True)
+
+        self.assertEqual("watch", result["overall"])
+        self.assertEqual(1, result["normal_count"])
+        self.assertEqual(1, result["delayed_count"])
+        self.assertEqual(1, result["attention_count"])
+        self.assertEqual("watch", result["checks"][1]["status"])
+        self.assertEqual(
+            "전체 2개 · 정상 1 · 지연 1 · 검증대기 0 · 고장 0",
+            result["health_line_plain"],
+        )
+
+    def test_system_feature_health_reports_domain_attention_separately(self):
+        board = {
+            "generated_at": "2026-07-20T08:00:00+09:00",
+            "checked_count": 1,
+            "alive_count": 1,
+            "summary": {"counts": {"alive": 1, "degraded": 0, "broken": 0, "unknown": 0}},
+            "checks": [
+                {
+                    "id": "sector_concentration",
+                    "label": "Sector concentration",
+                    "category": "risk",
+                    "status": "alive",
+                    "operational_state": "normal",
+                    "operational_state_label": "정상",
+                    "metadata": {
+                        "domain_attention": True,
+                        "domain_status": "review_required",
+                        "domain_attention_label": "업종 편중 검토 필요",
+                        "domain_attention_reason": "반도체 후보 비중 80%",
+                    },
+                    "detail": "status=review_required, top_sector_share_pct=80.0",
+                    "action": "Cap crowded sectors before promotion.",
+                }
+            ],
+        }
+        with patch("app.stock_suite_app.build_feature_health_board", return_value=board):
+            result = build_system_feature_health(compact=True)
+
+        self.assertEqual("ok", result["overall"])
+        self.assertEqual(1, result["normal_count"])
+        self.assertEqual(0, result["attention_count"])
+        self.assertEqual(1, result["domain_attention_count"])
+        self.assertEqual("sector_concentration", result["domain_attention_buttons"][0]["id"])
+        self.assertTrue(result["checks"][0]["domain_attention"])
+
+    def test_instant_feature_health_uses_cached_snapshot_without_deep_overlays(self):
+        board = {
+            "generated_at": "2026-07-19T21:00:00+09:00",
+            "checks": [
+                {
+                    "id": "sqlite_storage",
+                    "status": "degraded",
+                    "operational_state": "verification_pending",
+                },
+                {
+                    "id": "runtime_failure",
+                    "status": "broken",
+                    "operational_state": "broken",
+                },
+            ],
+        }
+        with (
+            patch.object(
+                stock_app,
+                "FEATURE_HEALTH_BOARD_CACHE",
+                (stock_app.time.time(), board),
+            ),
+            patch(
+                "app.stock_suite_app._fast_sqlite_storage_snapshot",
+                return_value={
+                    "ok": True,
+                    "stale": False,
+                    "problem_sqlite_count": 0,
+                    "max_query_ms": 12.5,
+                },
+            ),
+            patch(
+                "app.stock_suite_app._historical_replay_regeneration_ledger_progress",
+                side_effect=AssertionError("deep overlay must not run"),
+            ),
+            patch("app.stock_suite_app._start_feature_health_refresh") as refresh,
+        ):
+            result = stock_app.build_system_feature_health_instant()
+
+        refresh.assert_not_called()
+        self.assertEqual("cached_snapshot_no_deep_overlay", result["diagnostic_mode"])
+        self.assertEqual(1, result["normal_count"])
+        self.assertEqual(1, result["operational_broken_count"])
+        self.assertEqual("normal", result["checks"][0]["operational_state"])
+        self.assertFalse(result["live_order_allowed"])
 
     def test_completion_certificate_health_separates_progress_verified_and_broken(self):
         progress = {
@@ -4669,46 +5998,41 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
                 }
             ],
         }
-        rows = [
-            {
-                "source_replay_id": "HREPLAY-1",
-                "status": "verified_replacement_candidate",
-                "evidence_schema_version": stock_app.HISTORICAL_REPLAY_EVIDENCE_SCHEMA_VERSION,
-                "execution_timing_model_version": stock_app.HISTORICAL_REPLAY_EXECUTION_TIMING_MODEL_VERSION,
-                "replay_data_bundle_evidence_schema": stock_app.HISTORICAL_REPLAY_DATA_BUNDLE_SLICE_EVIDENCE_SCHEMA,
-            },
-            {
-                "source_replay_id": "HREPLAY-2",
-                "status": "verified_replacement_candidate",
-                "evidence_schema_version": stock_app.HISTORICAL_REPLAY_EVIDENCE_SCHEMA_VERSION,
-                "execution_timing_model_version": stock_app.HISTORICAL_REPLAY_EXECUTION_TIMING_MODEL_VERSION,
-                "replay_data_bundle_evidence_schema": stock_app.HISTORICAL_REPLAY_DATA_BUNDLE_SLICE_EVIDENCE_SCHEMA,
-            },
-        ]
         with (
             patch("app.stock_suite_app.build_feature_health_board", return_value=board),
-            patch("app.stock_suite_app._read_jsonl", return_value=rows),
             patch(
                 "app.stock_suite_app._historical_replay_campaign_manifest_scope",
                 return_value=(10, {"HREPLAY-1", "HREPLAY-2"}),
             ),
-            patch.object(
-                stock_app.HISTORICAL_REPLAY_REGENERATION_WORKER,
-                "status",
+            patch(
+                "app.stock_suite_app.responsive_historical_replay_regeneration_status",
                 return_value={
-                    "running": True,
-                    "thread_alive": True,
-                    "last_success_at": "2026-07-14T21:24:32+09:00",
-                    "interval_seconds": 15,
-                    "last_wait_seconds": 900,
-                    "last_result": {
-                        "selection": {
-                            "schedule_mode": "weekday_after_hours_bounded",
-                            "cadence_seconds": 300,
-                        }
+                    "progress": {
+                        "total_candidate_count": 10,
+                        "verified_count": 2,
+                        "quarantined_count": 0,
+                        "retryable_failure_count": 0,
+                        "blocked_failure_count": 0,
+                        "unattempted_count": 8,
+                        "remaining_candidate_count": 8,
+                        "label": "2/10 (20.00%)",
+                        "accounting": {"invariant_ok": True},
                     },
-                    "recent_success_elapsed_seconds": [3, 4, 5],
+                    "worker": {
+                        "health_state": "HEALTHY",
+                        "last_success_at": "2026-07-14T21:24:32+09:00",
+                    },
+                    "completion_estimate": {
+                        "cooldown_seconds": 300,
+                        "estimated_worker_duty_cycle_pct": 1.32,
+                        "estimated_hours_remaining": 2.0,
+                        "estimated_throughput_per_hour": 4.0,
+                    },
                 },
+            ),
+            patch(
+                "app.stock_suite_app._historical_replay_regeneration_ledger_progress",
+                side_effect=AssertionError("cached health rendering must not rescan the ledger"),
             ),
         ):
             result = build_system_feature_health(compact=True)
@@ -4724,6 +6048,49 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertIn("accounting_ok:True", row["detail"])
         self.assertIn("replay_worker=HEALTHY", row["detail"])
         self.assertIn("replay_duty_pct=1.32", row["detail"])
+
+    def test_system_health_uses_persisted_sqlite_snapshot_without_database_probe(self):
+        board = {
+            "generated_at": "2026-07-20T00:00:00+09:00",
+            "checked_count": 1,
+            "summary": {"counts": {"alive": 1}},
+            "checks": [
+                {
+                    "id": "sqlite_storage",
+                    "label": "SQLite storage",
+                    "category": "data",
+                    "status": "alive",
+                    "operational_state": "normal",
+                    "detail": "cached sqlite result",
+                }
+            ],
+        }
+        with (
+            patch("app.stock_suite_app.build_feature_health_board", return_value=board),
+            patch(
+                "app.stock_suite_app._fast_sqlite_storage_snapshot",
+                return_value={
+                    "ok": True,
+                    "status": "ready",
+                    "cached": True,
+                    "stale": False,
+                    "sqlite_file_count": 3,
+                    "total_sqlite_mb": 61.9,
+                    "problem_sqlite_count": 0,
+                    "max_query_ms": 7.5,
+                },
+            ),
+            patch(
+                "app.stock_suite_app._sqlite_storage_feature_probe",
+                side_effect=AssertionError("cached health rendering must not reopen SQLite"),
+            ),
+        ):
+            result = build_system_feature_health(compact=True)
+
+        row = result["checks"][0]
+        self.assertEqual("normal", row["operational_state"])
+        self.assertTrue(row["live_progress_overlay"])
+        self.assertIn("cached=True", row["detail"])
 
     def test_forced_system_feature_health_returns_synchronous_fresh_board(self):
         board = {
@@ -6048,7 +7415,7 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
         self.assertTrue(result["progress"]["confirmed"])
         self.assertEqual(result["progress"]["label"], result["progress"]["display_label"])
 
-    def test_responsive_status_overlays_current_ledger_progress_while_full_audit_refreshes(self):
+    def test_responsive_status_never_rescans_ledger_while_full_audit_refreshes(self):
         worker = type(
             "Worker",
             (),
@@ -6079,34 +7446,24 @@ class HistoricalReplayRegenerationContractTests(unittest.TestCase):
                 }
             },
         )()
-        live_progress = {
-            "verified_count": 14,
-            "remaining_candidate_count": 743,
-            "total_candidate_count": 757,
-            "label": "14/757 (1.85%)",
-        }
         with (
             patch("app.stock_suite_app.HISTORICAL_REPLAY_REGENERATION_WORKER", worker),
             patch("app.stock_suite_app.HISTORICAL_REPLAY_RESPONSIVE_STATUS_CACHE", status_cache),
             patch("app.stock_suite_app._historical_replay_responsive_cache_is_current", return_value=False),
             patch(
-                "app.stock_suite_app._historical_replay_campaign_manifest_scope",
-                return_value=(757, {"HREPLAY-1"}),
-            ),
-            patch(
                 "app.stock_suite_app._historical_replay_regeneration_ledger_progress",
-                return_value=live_progress,
+                side_effect=AssertionError("request path must not rescan the replay ledger"),
             ),
         ):
             result = stock_app.responsive_historical_replay_regeneration_status()
 
-        self.assertEqual("14/757 (1.85%)", result["progress"]["label"])
-        self.assertTrue(result["progress"]["confirmed"])
-        self.assertTrue(result["progress"]["live_ledger_overlay"])
+        self.assertEqual("10/757 (1.32%)", result["progress"]["label"])
+        self.assertFalse(result["progress"]["confirmed"])
+        self.assertFalse(result["progress"]["live_ledger_overlay"])
         self.assertTrue(result["progress"]["detail_snapshot_stale"])
-        self.assertFalse(result["progress"]["snapshot_stale"])
-        self.assertEqual("LIVE_LEDGER_OVERLAY_REFRESHING", result["source_state"])
-        self.assertIn("원장 확정", result["progress"]["display_label"])
+        self.assertTrue(result["progress"]["snapshot_stale"])
+        self.assertEqual("SOURCE_CHANGED_REFRESHING", result["source_state"])
+        self.assertNotEqual(result["progress"]["label"], result["progress"]["display_label"])
         self.assertFalse(result["worker"]["live_order_allowed"])
 
     def test_manual_replay_regeneration_batch_reports_verified_delta_and_cooldown_stop(self):

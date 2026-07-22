@@ -113,7 +113,11 @@ class CorporateActionRegistry:
     def __init__(self, root: Path) -> None:
         self.root = root; root.mkdir(parents=True, exist_ok=True)
 
-    def register(self, dataset_id: str, symbol: str, actions: list[dict[str, Any]], complete_history: bool = False, source_documents_verified: bool = False) -> dict[str, Any]:
+    def register(
+        self, dataset_id: str, symbol: str, actions: list[dict[str, Any]],
+        complete_history: bool = False, source_documents_verified: bool = False,
+        history_start: str = "", history_end: str = "",
+    ) -> dict[str, Any]:
         if not dataset_id or Path(dataset_id).name != dataset_id or not dataset_id.replace("-", "").replace("_", "").isalnum():
             raise ValueError("invalid corporate-action dataset id")
         symbol = symbol.upper()
@@ -123,11 +127,68 @@ class CorporateActionRegistry:
         normalized.sort(key=lambda value: (value["effective_date"], value["source_hash"]))
         if len({(row["effective_date"], row["source_hash"]) for row in normalized}) != len(normalized):
             raise ValueError("duplicate corporate actions are not allowed")
-        payload = {"schema_version": 1, "dataset_id": dataset_id, "symbol": symbol, "actions": normalized, "action_count": len(normalized), "coverage_start": normalized[0]["effective_date"], "coverage_end": normalized[-1]["effective_date"], "complete_history": bool(complete_history), "source_documents_verified": bool(source_documents_verified), "registered_at": datetime.now(timezone.utc).isoformat()}
+        history_first = date.fromisoformat(history_start) if history_start else None
+        history_last = date.fromisoformat(history_end) if history_end else None
+        if bool(history_first) != bool(history_last) or (history_first and history_last and history_last < history_first):
+            raise ValueError("corporate-action history coverage requires a valid start and end")
+        if complete_history and (not source_documents_verified or not history_first or not history_last):
+            raise ValueError("complete corporate-action history requires verified source documents and explicit coverage")
+        if history_first and history_last:
+            action_first, action_last = date.fromisoformat(normalized[0]["effective_date"]), date.fromisoformat(normalized[-1]["effective_date"])
+            if action_first < history_first or action_last > history_last:
+                raise ValueError("corporate actions fall outside declared history coverage")
+        verified_documents = sorted({(row["source_url"], row["source_hash"]) for row in normalized}) if source_documents_verified else []
+        payload = {
+            "schema_version": 1, "dataset_id": dataset_id, "symbol": symbol,
+            "actions": normalized, "action_count": len(normalized),
+            "coverage_start": history_first.isoformat() if history_first else normalized[0]["effective_date"],
+            "coverage_end": history_last.isoformat() if history_last else normalized[-1]["effective_date"],
+            "complete_history": bool(complete_history), "source_documents_verified": bool(source_documents_verified),
+            "verified_source_documents": [{"source_url": url, "source_hash": digest} for url, digest in verified_documents],
+            "verified_source_document_count": len(verified_documents),
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+        }
         payload["content_hash"] = _hash(payload)
         path = self._path(dataset_id); temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"); temporary.replace(path)
-        return {key: payload[key] for key in ("dataset_id", "symbol", "action_count", "coverage_start", "coverage_end", "complete_history", "source_documents_verified", "content_hash", "registered_at")}
+        return {key: payload[key] for key in ("dataset_id", "symbol", "action_count", "coverage_start", "coverage_end", "complete_history", "source_documents_verified", "verified_source_document_count", "content_hash", "registered_at")}
+
+    def reconcile(self, expected_symbols: list[str], coverage_start: str, coverage_end: str) -> dict[str, Any]:
+        first, last = date.fromisoformat(coverage_start), date.fromisoformat(coverage_end)
+        if last < first:
+            raise ValueError("corporate-action reconciliation end precedes start")
+        expected = sorted({str(value).upper() for value in expected_symbols})
+        if not expected or any(not value.isalnum() for value in expected):
+            raise ValueError("corporate-action reconciliation requires alphanumeric symbols")
+        status = self.status()
+        by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for row in status["datasets"]:
+            by_symbol.setdefault(str(row.get("symbol") or ""), []).append(row)
+        rows, missing = [], []
+        for symbol in expected:
+            candidates = by_symbol.get(symbol, [])
+            qualified = [
+                row for row in candidates
+                if row.get("complete_history") is True
+                and row.get("source_documents_verified") is True
+                and int(row.get("verified_source_document_count") or 0) > 0
+                and str(row.get("coverage_start") or "") <= coverage_start
+                and str(row.get("coverage_end") or "") >= coverage_end
+            ]
+            reason = "verified_complete_coverage" if qualified else "missing_or_incomplete_official_history"
+            rows.append({"symbol": symbol, "passed": bool(qualified), "reason": reason, "dataset_ids": [row.get("dataset_id") for row in qualified]})
+            if not qualified:
+                missing.append(symbol)
+        payload = {
+            "schema_version": 1, "checked_at": datetime.now(timezone.utc).isoformat(),
+            "coverage_start": first.isoformat(), "coverage_end": last.isoformat(),
+            "expected_symbol_count": len(expected), "passed_symbol_count": len(expected) - len(missing),
+            "missing_symbols": missing, "symbols": rows,
+            "registry_invalid": status["invalid"], "passed": not missing and not status["invalid"],
+            "read_only": True, "order_allowed": False,
+        }
+        payload["evidence_hash"] = _hash(payload)
+        return payload
 
     def get(self, dataset_id: str) -> dict[str, Any]:
         path = self._path(dataset_id)
@@ -155,7 +216,7 @@ class CorporateActionRegistry:
         datasets, invalid = [], []
         for path in sorted(self.root.glob("*.json")):
             try:
-                payload = self.get(path.stem); datasets.append({key: payload.get(key) for key in ("dataset_id", "symbol", "action_count", "coverage_start", "coverage_end", "complete_history", "source_documents_verified", "content_hash")})
+                payload = self.get(path.stem); datasets.append({key: payload.get(key) for key in ("dataset_id", "symbol", "action_count", "coverage_start", "coverage_end", "complete_history", "source_documents_verified", "verified_source_document_count", "content_hash")})
             except Exception as exc: invalid.append({"path": str(path), "error": str(exc)})
         return {"ok": not invalid, "dataset_count": len(datasets), "datasets": datasets, "invalid": invalid, "complete_dataset_count": sum(bool(row["complete_history"]) for row in datasets)}
 

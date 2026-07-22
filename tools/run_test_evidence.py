@@ -155,7 +155,9 @@ class EvidenceResult(unittest.TextTestResult):
 def _load_suite(names: list[str], discover: bool) -> unittest.TestSuite:
     loader = unittest.defaultTestLoader
     if discover:
-        return loader.discover(str(REPO_ROOT / "tests"), pattern="test_*.py", top_level_dir=str(REPO_ROOT))
+        # Match ``python -m unittest discover -s tests``. The tests directory is
+        # intentionally not required to be an importable Python package.
+        return loader.discover(str(REPO_ROOT / "tests"), pattern="test_*.py")
     return loader.loadTestsFromNames(names or ["tests"])
 
 

@@ -12,6 +12,7 @@ from app.stock_suite_app import (
     UniverseStore,
     _ai_tournament_bias_audit,
     _build_point_in_time_universe_coverage_certificate,
+    _point_in_time_capture_chain_plan,
     _ensure_long_horizon_fixed_etf_universe,
     _long_horizon_fixed_etf_universe_status,
     _long_horizon_performance_evidence,
@@ -628,6 +629,31 @@ class LongHorizonPerformanceEvidenceTests(unittest.TestCase):
         )
         self.assertTrue(two_days["official_performance_range_ready"])
         self.assertEqual("2026-07-14", two_days["official_performance_certified_through"])
+
+    def test_capture_chain_appends_only_the_next_expected_session(self):
+        histories = [{
+            "dataset_id": "kind-official-daily",
+            "source": "KRX KIND listed-company Excel",
+            "coverage_end": "2026-07-13",
+        }]
+        plan = _point_in_time_capture_chain_plan(histories, "2026-07-14")
+        self.assertEqual("append_snapshot", plan["action"])
+        self.assertEqual("kind-official-daily", plan["dataset_id"])
+        self.assertEqual([], plan["missing_session_dates"])
+
+    def test_capture_chain_starts_new_chain_instead_of_backfilling_a_gap(self):
+        histories = [{
+            "dataset_id": "kind-official-daily",
+            "source": "KRX KIND listed-company Excel",
+            "coverage_end": "2026-07-13",
+        }]
+        plan = _point_in_time_capture_chain_plan(histories, "2026-07-20")
+        self.assertEqual("create_baseline_after_gap", plan["action"])
+        self.assertEqual("kind-official-daily-20260720", plan["dataset_id"])
+        self.assertEqual(
+            ["2026-07-14", "2026-07-15", "2026-07-16"],
+            plan["missing_session_dates"],
+        )
 
     def test_bias_audit_does_not_auto_promote_unofficial_declared_intervals(self):
         with tempfile.TemporaryDirectory() as directory:

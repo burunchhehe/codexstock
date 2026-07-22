@@ -28,6 +28,9 @@ from .hts_validation import HtsReferenceRegistry
 from .lifecycle import ResearchLifecycle
 from .readiness import evaluate_readiness
 from .corporate_actions import CorporateActionRegistry
+from .instrument_contracts import contract_manifest, normalize_instrument_dataset_contract
+from .shards import ResearchShardCoordinator
+from .stability import EngineStabilityLedger
 
 
 @dataclass
@@ -72,6 +75,9 @@ class ResearchForge:
             {"id": "async_job_store", "ok": self.jobs().status()["ok"]},
             {"id": "analytical_storage", "ok": self.storage().doctor()["ok"]},
             {"id": "corporate_action_registry", "ok": self.corporate_actions().status()["ok"]},
+            {"id": "instrument_contracts", "ok": contract_manifest()["contract_count"] >= 4},
+            {"id": "distributed_shard_store", "ok": self.shards().root.is_dir()},
+            {"id": "engine_stability_ledger", "ok": self.stability().path.parent.is_dir()},
             {"id": "hts_reference_registry", "ok": self.hts_references().status()["ok"]},
             {"id": "mcp_surface", "ok": len(self.manifest()["tools"]) >= 20},
         ]
@@ -93,6 +99,16 @@ class ResearchForge:
                 "research_corporate_action_register_verified",
                 "research_corporate_action_query",
                 "research_corporate_action_adjust_registered",
+                "research_corporate_action_reconcile",
+                "research_instrument_contracts",
+                "research_instrument_validate",
+                "research_shard_batch_create",
+                "research_shard_claim",
+                "research_shard_heartbeat",
+                "research_shard_finish",
+                "research_shard_status",
+                "research_stability_record",
+                "research_stability_audit",
                 "research_strategy_validate",
                 "research_experiment_create",
                 "research_experiment_get",
@@ -158,6 +174,7 @@ class ResearchForge:
                 "research_microstructure_worker_resume",
                 "research_realtime_status",
                 "research_realtime_start",
+                "research_realtime_resume",
                 "research_realtime_runs",
                 "research_hts_reference_register",
                 "research_hts_csv_template",
@@ -180,9 +197,25 @@ class ResearchForge:
             raise ValueError("; ".join(errors))
         if not data_snapshot.get("dataset_id"):
             raise ValueError("data_snapshot.dataset_id is required for reproducibility")
+        symbols = strategy.rules.get("symbols") if isinstance(strategy.rules.get("symbols"), list) else [
+            strategy.rules.get("symbol") or data_snapshot.get("symbol")
+        ]
+        contract_snapshot = dict(data_snapshot)
+        if not any(symbols) and self.adapter.name == "mock":
+            symbols = ["005930"]
+            contract_snapshot["instrument_contract_symbol_source"] = "mock_adapter_default"
+        instrument_contract = normalize_instrument_dataset_contract(
+            contract_snapshot,
+            [str(value) for value in symbols if value],
+        )
+        if not instrument_contract["passed"]:
+            raise ValueError(
+                "instrument dataset contract failed: "
+                + ", ".join(str(value) for value in instrument_contract["errors"])
+            )
         record = ExperimentRecord(
             strategy,
-            data_snapshot,
+            instrument_contract["normalized_snapshot"],
             execution_model,
             code_version=__version__,
             backtest_adapter=self.adapter.name,
@@ -193,6 +226,13 @@ class ResearchForge:
     def run_backtest(self, experiment_id: str) -> ExperimentRecord:
         self.policy.assert_safe()
         record = self.registry.get(experiment_id)
+        instrument_contract = self._instrument_contract_evidence(record)
+        if not instrument_contract["passed"]:
+            raise ValueError(
+                "instrument dataset contract failed: "
+                + ", ".join(str(value) for value in instrument_contract["errors"])
+            )
+        record.data_snapshot = instrument_contract["normalized_snapshot"]
         if record.backtest_adapter not in {"unknown", self.adapter.name}:
             raise ValueError(
                 f"experiment is pinned to adapter {record.backtest_adapter}, not {self.adapter.name}"
@@ -311,6 +351,12 @@ class ResearchForge:
     def corporate_actions(self) -> CorporateActionRegistry:
         return CorporateActionRegistry(self.registry.root.parent / "corporate_actions")
 
+    def shards(self) -> ResearchShardCoordinator:
+        return ResearchShardCoordinator(self.registry.root.parent / "distributed_shards")
+
+    def stability(self) -> EngineStabilityLedger:
+        return EngineStabilityLedger(self.registry.root.parent / "stability" / "engine_snapshots.jsonl")
+
     def readiness(self, external: dict[str, Any] | None = None) -> dict[str, Any]:
         return evaluate_readiness(self, external)
 
@@ -321,15 +367,74 @@ class ResearchForge:
         record = self.registry.get(experiment_id); verification = self.verify_export(experiment_id)
         if verification.get("errors") == ["manifest_missing"]:
             self.export(experiment_id); verification = self.verify_export(experiment_id)
-        return self.lifecycle().readiness(record, verification)
+        contract = self._instrument_contract_evidence(record)
+        return self.lifecycle().readiness(
+            record,
+            verification,
+            supplemental_checks=[{
+                "id": "instrument_contract_valid",
+                "ok": contract.get("passed") is True,
+            }],
+            supplemental_evidence={"instrument_contract": contract},
+        )
 
     def review_experiment(self, experiment_id: str, action: str, reviewer: str, rationale: str, confirmation: str = "") -> dict[str, Any]:
         record = self.registry.get(experiment_id); verification = self.verify_export(experiment_id)
         if verification.get("errors") == ["manifest_missing"]:
             self.export(experiment_id); verification = self.verify_export(experiment_id)
-        decision = self.lifecycle().review(record, action, reviewer, rationale, verification, confirmation)
+        contract = self._instrument_contract_evidence(record)
+        decision = self.lifecycle().review(
+            record,
+            action,
+            reviewer,
+            rationale,
+            verification,
+            confirmation,
+            supplemental_checks=[{
+                "id": "instrument_contract_valid",
+                "ok": contract.get("passed") is True,
+            }],
+            supplemental_evidence={"instrument_contract": contract},
+        )
         self.registry.save(record); report = self.export(experiment_id); card = self.lifecycle().create_card(record, decision, report)
         return {"ok": True, "experiment": record.to_dict(), "decision": decision, "research_card": card, "report": report}
+
+    def auto_nominate_verified_paper(
+        self,
+        experiment_id: str,
+        *,
+        scheduler_id: str,
+        rationale: str,
+    ) -> dict[str, Any]:
+        record = self.registry.get(experiment_id)
+        verification = self.verify_export(experiment_id)
+        if verification.get("errors") == ["manifest_missing"]:
+            self.export(experiment_id)
+            verification = self.verify_export(experiment_id)
+        contract = self._instrument_contract_evidence(record)
+        decision = self.lifecycle().auto_nominate_verified_paper(
+            record,
+            verification,
+            scheduler_id=scheduler_id,
+            rationale=rationale,
+            supplemental_checks=[{
+                "id": "instrument_contract_valid",
+                "ok": contract.get("passed") is True,
+            }],
+            supplemental_evidence={"instrument_contract": contract},
+        )
+        self.registry.save(record)
+        report = self.export(experiment_id)
+        card = self.lifecycle().create_card(record, decision, report)
+        return {
+            "ok": True,
+            "experiment": record.to_dict(),
+            "decision": decision,
+            "research_card": card,
+            "report": report,
+            "paper_only": True,
+            "live_order_allowed": False,
+        }
 
     def concurrency_soak(self, iterations: int = 20) -> dict[str, Any]:
         candidates = [record for record in self.registry.list() if record.backtest_adapter == self.adapter.name and record.result]
@@ -353,6 +458,15 @@ class ResearchForge:
             symbols,
             str(record.data_snapshot.get("start_date") or ""),
             str(record.data_snapshot.get("end_date") or ""),
+        )
+
+    def _instrument_contract_evidence(self, record: ExperimentRecord) -> dict[str, Any]:
+        symbols = record.strategy.rules.get("symbols") if isinstance(record.strategy.rules.get("symbols"), list) else [
+            record.strategy.rules.get("symbol") or record.data_snapshot.get("symbol")
+        ]
+        return normalize_instrument_dataset_contract(
+            record.data_snapshot,
+            [str(value) for value in symbols if value],
         )
 
     def _assert_adapter(self, record: ExperimentRecord) -> None:

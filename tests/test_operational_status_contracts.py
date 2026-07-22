@@ -152,6 +152,7 @@ class OperationalStatusContractTests(unittest.TestCase):
             result = stock_app._quote_health_probe_bundle(ttl_seconds=0)
 
         self.assertEqual(["005930", "000660"], quote_audit.call_args.kwargs["symbols"])
+        self.assertFalse(quote_audit.call_args.kwargs["prefer_live"])
         self.assertEqual(["005930", "000660"], snapshots.call_args_list[0].kwargs["symbols"])
         self.assertEqual(["NVDA"], snapshots.call_args_list[1].kwargs["symbols"])
         self.assertEqual("safe_quarantine", result["fallback_quarantine"]["status"])
@@ -333,6 +334,20 @@ class OperationalStatusContractTests(unittest.TestCase):
             self.assertFalse(stock_app._delegated_risk_monitor_should_restore({**policy, "day_halted": True}))
             self.assertFalse(stock_app._delegated_risk_monitor_should_restore({**policy, "live_execution_enabled": False}))
 
+    def test_explicit_delegated_mode_is_standing_authorization(self):
+        authorization = stock_app.build_delegated_live_authorization(
+            {
+                "live_execution_control_mode": "delegated_auto",
+                "delegated_live_autonomy_enabled": True,
+                "delegated_live_authorization_mode": "standing",
+                "delegated_live_authorization_confirmed": False,
+                "delegated_live_authorized_date": "",
+            },
+            target_date="2026-07-21",
+        )
+        self.assertTrue(authorization["valid_today"])
+        self.assertEqual("STANDING_DELEGATION_ACTIVE", authorization["status"])
+
     def test_quick_worker_board_reports_complete_seven_worker_roster(self):
         now = datetime.now(ZoneInfo("Asia/Seoul")).isoformat(timespec="seconds")
         meeting = {
@@ -383,6 +398,7 @@ class OperationalStatusContractTests(unittest.TestCase):
             patch("app.stock_suite_app.latest_live_account_change_quick_summary", return_value=account),
             patch("app.stock_suite_app.latest_intraday_minute_check_quick_summary", return_value=minute),
             patch("app.stock_suite_app.latest_broker_execution_check_quick_summary", return_value=broker),
+            patch("app.stock_suite_app.autopilot_runs", return_value=[{"created_at": now}]),
             patch.object(stock_app.MEMORY, "summary", return_value=memory),
             patch.object(stock_app.OPS, "approvals", return_value=[]),
             patch.object(stock_app.OPS, "pending_telegram_outbox", return_value=[]),
@@ -402,6 +418,19 @@ class OperationalStatusContractTests(unittest.TestCase):
         self.assertEqual(result["sequence_number"], result["worker_board"]["sequence_number"])
         self.assertEqual("ai_worker_status_quick", result["source_component"])
         self.assertTrue(result["expires_at"])
+        by_id = {row["id"]: row for row in result["workers"]}
+        self.assertEqual(now, by_id["research_market"]["last_evidence_at"])
+        self.assertEqual(now, by_id["operator"]["last_evidence_at"])
+        self.assertEqual(now, by_id["risk"]["last_evidence_at"])
+
+    def test_newest_worker_evidence_uses_most_recent_valid_timestamp(self):
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        old = (now - timedelta(days=2)).isoformat(timespec="seconds")
+        recent = (now - timedelta(seconds=5)).isoformat(timespec="seconds")
+
+        result = stock_app._newest_ai_worker_evidence_at("", old, "not-a-date", recent)
+
+        self.assertEqual(recent, result)
 
     def test_live_execution_authority_separates_capable_enabled_and_authorized(self):
         trading_date = stock_app.today_kst()
@@ -1134,6 +1163,48 @@ class OperationalStatusContractTests(unittest.TestCase):
         self.assertEqual(1, convert.call_count)
         self.assertFalse(first["live_order_allowed"])
 
+    def test_research_forge_candidate_discovery_auto_nominates_only_strict_ready_validation(self):
+        experiment_id = "exp_auto_nomination_ready"
+        validation_experiment = SimpleNamespace(
+            id=experiment_id,
+            status=SimpleNamespace(value="VALIDATION"),
+        )
+        nominated_experiment = SimpleNamespace(
+            id=experiment_id,
+            status=SimpleNamespace(value="PAPER_CANDIDATE"),
+        )
+        forge = MagicMock()
+        forge.registry.list.return_value = [validation_experiment]
+        forge.registry.get.return_value = nominated_experiment
+        forge.lifecycle_readiness.return_value = {
+            "eligible_for_manual_paper_nomination": True,
+            "blockers": [],
+        }
+        candidate = self._verified_promotion_candidate(
+            "candidate-auto-nomination",
+            experiment_id=experiment_id,
+        )
+        candidate["research_forge_experiment_id"] = experiment_id
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate_file = Path(temp_dir) / "candidates.jsonl"
+            with (
+                patch.object(stock_app, "RESEARCH_FORGE", forge),
+                patch.object(stock_app, "STRATEGY_PROMOTION_CANDIDATE_FILE", candidate_file),
+                patch("app.stock_suite_app._research_forge_promotion_candidate_record", return_value=candidate),
+                patch.object(stock_app.JOURNAL, "add"),
+            ):
+                result = stock_app._discover_research_forge_promotion_candidates(max_imports=1)
+                rows = stock_app._read_jsonl(candidate_file, limit=10)
+
+        self.assertEqual("imported", result["status"])
+        self.assertEqual(1, result["automatically_nominated_experiment_count"])
+        self.assertTrue(result["automatic_verified_paper_nomination"])
+        self.assertEqual(1, result["imported_count"])
+        self.assertEqual(1, len(rows))
+        forge.auto_nominate_verified_paper.assert_called_once()
+        self.assertFalse(result["automatic_promotion"])
+        self.assertFalse(result["live_order_allowed"])
+
     def test_research_forge_candidate_discovery_does_not_store_blocked_evidence(self):
         experiment_id = "exp_discovery_blocked"
         experiment = SimpleNamespace(
@@ -1758,6 +1829,159 @@ class OperationalStatusContractTests(unittest.TestCase):
             {"server.out.log", "live_order_submits.jsonl", "runtime/stock_suite_app.lock"},
             {row["path"] for row in findings},
         )
+
+    def test_operational_daily_evidence_records_one_hashed_snapshot_per_day(self):
+        health = {
+            "checked_count": 41,
+            "operational_counts": {
+                "normal": 39,
+                "delayed": 1,
+                "verification_pending": 1,
+                "broken": 0,
+            },
+            "surface_coverage": {"coverage_pct": 100.0},
+        }
+        start = datetime(2026, 6, 20, 12, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_file = Path(temp_dir) / "operational_daily.jsonl"
+            with patch.object(stock_app, "OPERATIONAL_DAILY_EVIDENCE_FILE", evidence_file):
+                result = {}
+                for offset in range(30):
+                    result = stock_app.record_operational_daily_evidence(
+                        health,
+                        now=start + timedelta(days=offset),
+                        source="unit-test",
+                    )
+                duplicate = stock_app.record_operational_daily_evidence(
+                    health,
+                    now=start + timedelta(days=29, hours=1),
+                    source="unit-test",
+                )
+                rows = stock_app._read_jsonl(evidence_file, limit=100)
+
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["chain_complete"])
+        self.assertEqual(30, result["verified_day_count"])
+        self.assertEqual(100.0, result["coverage_pct"])
+        self.assertEqual(30, len(rows))
+        self.assertFalse(duplicate["recorded"])
+        self.assertEqual("already_recorded_today", duplicate["record_status"])
+        self.assertFalse(result["live_order_allowed"])
+
+    def test_operational_daily_evidence_quarantines_hash_tampering(self):
+        health = {
+            "total_count": 41,
+            "healthy_count": 41,
+            "stale_count": 0,
+            "pending_count": 0,
+            "broken_count": 0,
+            "evidence_coverage_pct": 100.0,
+        }
+        start = datetime(2026, 7, 1, 12, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_file = Path(temp_dir) / "operational_daily.jsonl"
+            with patch.object(stock_app, "OPERATIONAL_DAILY_EVIDENCE_FILE", evidence_file):
+                for offset in range(3):
+                    stock_app.record_operational_daily_evidence(
+                        health,
+                        now=start + timedelta(days=offset),
+                        source="unit-test",
+                    )
+                rows = stock_app._read_jsonl(evidence_file, limit=10)
+                rows[1]["feature_health"]["broken_count"] = 7
+                audit = stock_app.build_operational_daily_evidence_audit(rows)
+
+        self.assertFalse(audit["ok"])
+        self.assertFalse(audit["chain_complete"])
+        self.assertEqual(1, audit["verified_day_count"])
+        self.assertEqual(2, audit["quarantined_count"])
+        self.assertIn("hash_chain_incomplete", audit["blockers"])
+        self.assertFalse(audit["live_order_allowed"])
+
+    def test_long_term_evidence_progress_combines_three_read_only_ledgers(self):
+        now = datetime(2026, 7, 19, 12, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        operational = {
+            "ready": False,
+            "raw_count": 1,
+            "verified_day_count": 1,
+            "last_verified_date": "2026-07-19",
+            "calendar_span_days": 1,
+            "coverage_pct": 100.0,
+            "chain_complete": True,
+            "blockers": ["verified_daily_snapshots_below_30"],
+        }
+        rehearsal_audit = {"ok": True, "raw_count": 5, "blockers": []}
+        rehearsal = {
+            "ready": False,
+            "verified_count": 5,
+            "required_verified_count": 20,
+            "unique_session_day_count": 2,
+            "unique_symbol_count": 3,
+            "blockers": ["verified_lifecycle_count"],
+        }
+        forward = {
+            "ready": False,
+            "raw_row_count": 8,
+            "verified_forward_days": 12,
+            "required_calendar_days": 90,
+            "verified_observation_day_count": 8,
+            "session_coverage_pct": 100.0,
+            "next_required_observation_date": "2026-07-20",
+            "evidence_integrity": {"hash_chain_complete": True},
+            "blockers": ["forward_calendar_span_below_90_days"],
+        }
+        with (
+            patch.object(stock_app, "build_operational_daily_evidence_audit", return_value=operational),
+            patch.object(
+                stock_app,
+                "_promotion_rehearsal_progress_snapshot",
+                return_value=(rehearsal_audit, rehearsal),
+            ),
+            patch.object(stock_app, "build_promotion_forward_observation_audit", return_value=forward),
+        ):
+            result = stock_app.build_long_term_evidence_progress(now=now)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(0, result["ready_count"])
+        self.assertEqual(3, result["total_count"])
+        self.assertEqual("2026-07-20", result["next_due_date"])
+        self.assertEqual([1, 5, 12], [row["current"] for row in result["rows"]])
+        self.assertEqual([30, 20, 90], [row["target"] for row in result["rows"]])
+        self.assertTrue(result["automatic_collection"])
+        self.assertTrue(result["paper_only"])
+        self.assertFalse(result["live_order_allowed"])
+
+    def test_promotion_rehearsal_progress_uses_deep_audit_cache(self):
+        cached_audit = {"ok": True, "raw_count": 7, "verified_count": 6, "quarantined_count": 0}
+        cached_readiness = {
+            "ready": False,
+            "verified_count": 6,
+            "required_verified_count": 20,
+            "unique_session_day_count": 3,
+            "unique_symbol_count": 3,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "maturity.json"
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "payload": {
+                            "forward_operating_evidence": {
+                                "promotion_rehearsal_evidence_audit": cached_audit,
+                                "promotion_rehearsal_readiness": cached_readiness,
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(stock_app, "CODEXSTOCK_MATURITY_CACHE_FILE", cache_file):
+                audit, readiness = stock_app._promotion_rehearsal_progress_snapshot()
+
+        self.assertEqual(6, audit["verified_count"])
+        self.assertEqual(6, readiness["verified_count"])
+        self.assertEqual("maturity_deep_audit_cache", audit["summary_source"])
 
 
 if __name__ == "__main__":

@@ -614,10 +614,10 @@ class WeaknessCompletionAuditTests(unittest.TestCase):
                 "file_exists": True,
                 "active_response_file": r"C:\external-search-mcp\codexstock_outbox\market_news_evidence_collection_response.json",
                 "response_read_files": [
-                    r"C:\Users\김진우\AppData\Local\CodexStock\data\market_news_evidence_collection_response.json",
+                    r"C:\Users\Example\AppData\Local\CodexStock\data\market_news_evidence_collection_response.json",
                     r"C:\external-search-mcp\codexstock_outbox\market_news_evidence_collection_response.json",
                 ],
-                "response_write_file": r"C:\Users\김진우\AppData\Local\CodexStock\data\market_news_evidence_collection_response.json",
+                "response_write_file": r"C:\Users\Example\AppData\Local\CodexStock\data\market_news_evidence_collection_response.json",
                 "accepted_source_record_count": 2,
                 "matched_event_count": 1,
                 "blockers": [],
@@ -1133,6 +1133,34 @@ class WeaknessCompletionAuditTests(unittest.TestCase):
                     "live_order_allowed": False,
                 },
             ),
+            patch.object(
+                suite,
+                "_promotion_candidate_evidence_audit",
+                return_value={
+                    "schema": "codexstock_promotion_candidate_evidence_audit_v1",
+                    "raw_count": 0,
+                    "verified_count": 0,
+                    "quarantined_count": 0,
+                    "paper_only": True,
+                    "live_order_allowed": False,
+                },
+            ),
+            patch.object(
+                suite,
+                "_research_forge_candidate_discovery_audit",
+                return_value={
+                    "schema": "codexstock_research_forge_candidate_discovery_audit_v1",
+                    "contract_ready": True,
+                    "requires_manual_research_forge_nomination": False,
+                    "supports_automatic_verified_paper_nomination": True,
+                    "automatic_nomination_requires_all_lifecycle_gates": True,
+                    "requires_verified_historical_provider_evidence": True,
+                    "requires_next_krx_session_cooling": True,
+                    "scheduler_eligible_candidate_count": 0,
+                    "paper_only": True,
+                    "live_order_allowed": False,
+                },
+            ),
             patch.object(suite, "build_feature_health_board", return_value=health),
             patch.object(suite, "_feature_surface_contract_probe", return_value=surface),
         )
@@ -1152,7 +1180,7 @@ class WeaknessCompletionAuditTests(unittest.TestCase):
         self.assertTrue(
             objective_tracks["paper_candidate_provenance_and_discovery"]["system_ready"]
         )
-        self.assertTrue(
+        self.assertFalse(
             objective_tracks["paper_candidate_provenance_and_discovery"]["current_outcome_passed"]
         )
         self.assertTrue(objective_tracks["monte_carlo_stress_evidence"]["system_ready"])

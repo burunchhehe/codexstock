@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -172,9 +173,12 @@ class HepiOpsCore:
         self.telegram_outbox_file = self.data_dir / "telegram_outbox.jsonl"
         self.telegram_dispatch_file = self.data_dir / "telegram_dispatch.jsonl"
         self.telegram_policy_file = self.data_dir / "telegram_policy.json"
+        self._telegram_queue_lock = threading.Lock()
         self.kis_state_file = self.data_dir / "kis_state.json"
         self.risk_state_file = self.data_dir / "risk_state.json"
         self.autotrade_policy_file = self.data_dir / "autotrade_policy.json"
+        self.shadow_signal_outbox = self.data_dir / "execution_sidecar" / "inbox"
+        self.shadow_signal_secret_file = self.data_dir / "execution_sidecar" / "signal_secret"
         self.paper_start_cash = 100_000_000.0
         self.max_order_amount = 2_000_000.0
         self.max_daily_orders = 20
@@ -225,6 +229,7 @@ class HepiOpsCore:
             "live_candidate_enabled": True,
             "live_execution_enabled": False,
             "live_pilot_enabled": False,
+            "live_execution_control_mode": "manual_approval",
             "require_approval": True,
             "emergency_halt": False,
             "buy_blocked": False,
@@ -246,14 +251,18 @@ class HepiOpsCore:
             "delegated_live_authorized_at": "",
             "delegated_live_authorization_source": "",
             "delegated_live_authorization_scope": "",
+            "delegated_live_authorization_mode": "daily",
             "delegated_live_auto_submit_max_cash_pct": 30.0,
             "delegated_live_user_approval_above_cash_pct": 50.0,
             "delegated_live_min_buy_symbols_per_day": 1,
             "delegated_live_max_position_cash_pct": 30.0,
             "delegated_live_max_buy_orders_per_day": 1,
             "delegated_live_max_sell_orders_per_day": 1,
+            "delegated_live_reentry_cooldown_minutes": 90,
             "delegated_live_stop_loss_pct": 2.0,
             "delegated_live_take_profit_pct": 3.0,
+            "delegated_live_profit_partial_exit_pct": 50.0,
+            "delegated_live_profit_trailing_drawdown_pct": 1.0,
             "max_daily_orders": self.max_daily_orders,
             "max_position_pct": 10.0,
             "max_daily_loss_pct": 2.0,
@@ -267,8 +276,18 @@ class HepiOpsCore:
     def autotrade_policy(self) -> dict[str, Any]:
         policy = self._default_autotrade_policy()
         saved = self._read_json(self.autotrade_policy_file, {})
+        saved_has_control_mode = isinstance(saved, dict) and "live_execution_control_mode" in saved
         if isinstance(saved, dict):
             policy.update(saved)
+        mode = str(policy.get("live_execution_control_mode") or "").strip().lower()
+        if not saved_has_control_mode or mode not in {"manual_approval", "delegated_auto"}:
+            mode = "delegated_auto" if (
+                bool(policy.get("delegated_live_autonomy_enabled"))
+                and not bool(policy.get("require_approval", True))
+            ) else "manual_approval"
+        policy["live_execution_control_mode"] = mode
+        policy["require_approval"] = mode == "manual_approval"
+        policy["delegated_live_autonomy_enabled"] = mode == "delegated_auto"
         risk_state = self._read_json(self.risk_state_file, {})
         if isinstance(risk_state, dict):
             for key in ("emergency_halt", "buy_blocked", "day_halted"):
@@ -301,6 +320,8 @@ class HepiOpsCore:
             "live_pilot_dynamic_max_cash_pct": (0.1, 100.0),
             "delegated_live_stop_loss_pct": (0.1, 30.0),
             "delegated_live_take_profit_pct": (0.1, 100.0),
+            "delegated_live_profit_partial_exit_pct": (1.0, 100.0),
+            "delegated_live_profit_trailing_drawdown_pct": (0.1, 20.0),
             "delegated_live_auto_submit_max_cash_pct": (0.1, 100.0),
             "delegated_live_user_approval_above_cash_pct": (0.1, 100.0),
             "delegated_live_max_position_cash_pct": (0.1, 100.0),
@@ -314,6 +335,7 @@ class HepiOpsCore:
             "delegated_live_max_buy_orders_per_day": (0, 20),
             "delegated_live_min_buy_symbols_per_day": (1, 20),
             "delegated_live_max_sell_orders_per_day": (0, 20),
+            "delegated_live_reentry_cooldown_minutes": (0, 1440),
             "min_paper_rehearsals_before_live": (0, 1000),
             "min_readiness_score_for_live": (0, 100),
         }
@@ -339,12 +361,34 @@ class HepiOpsCore:
                 "delegated_live_authorization_scope",
             }:
                 policy[key] = str(value).strip()[:200]
+            elif key == "delegated_live_authorization_mode":
+                mode = str(value).strip().lower()
+                if mode not in {"daily", "standing"}:
+                    raise ValueError("invalid_delegated_authorization_mode")
+                policy[key] = mode
             elif key == "live_pilot_sizing_mode":
                 mode = str(value).strip().lower()
                 policy[key] = mode if mode in {"single_share", "cash_pct"} else "single_share"
+            elif key == "live_execution_control_mode":
+                mode = str(value).strip().lower()
+                if mode not in {"manual_approval", "delegated_auto"}:
+                    raise ValueError("invalid_live_execution_control_mode")
+                policy[key] = mode
             elif key == "memo":
                 policy[key] = str(value)[:500]
-        if "delegated_live_autonomy_enabled" in patch and not bool(patch.get("delegated_live_autonomy_enabled")):
+        if "live_execution_control_mode" in patch:
+            delegated = policy["live_execution_control_mode"] == "delegated_auto"
+            policy["delegated_live_autonomy_enabled"] = delegated
+            policy["require_approval"] = not delegated
+            policy["delegated_live_authorization_mode"] = "standing" if delegated else "daily"
+        elif "delegated_live_autonomy_enabled" in patch or "require_approval" in patch:
+            delegated = bool(policy.get("delegated_live_autonomy_enabled")) and not bool(
+                policy.get("require_approval", True)
+            )
+            policy["live_execution_control_mode"] = "delegated_auto" if delegated else "manual_approval"
+            policy["delegated_live_autonomy_enabled"] = delegated
+            policy["require_approval"] = not delegated
+        if not bool(policy.get("delegated_live_autonomy_enabled")):
             policy["delegated_live_authorization_confirmed"] = False
             policy["delegated_live_authorized_date"] = ""
             policy["delegated_live_authorized_at"] = ""
@@ -581,8 +625,14 @@ class HepiOpsCore:
             checks.append(
                 {
                     "name": "approval_required",
-                    "ok": bool(policy.get("require_approval", True)),
-                    "detail": "실전 후보는 승인 게이트를 반드시 거칩니다.",
+                    "ok": bool(
+                        isinstance(ticket.get("metadata"), dict)
+                        and ticket["metadata"].get("shadow_validation_only") is True
+                    ) or str(policy.get("live_execution_control_mode") or "manual_approval")
+                    in {"manual_approval", "delegated_auto"},
+                    "detail": (
+                        "반자동은 승인 게이트, 완전자동은 서명된 외부 실행기 신호 게이트를 거칩니다."
+                    ),
                 }
             )
             checks.append(
@@ -607,6 +657,11 @@ class HepiOpsCore:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_mode = "live_candidate" if mode in {"live", "live_candidate"} else "paper"
+        shadow_validation_only = bool(
+            normalized_mode == "live_candidate"
+            and isinstance(metadata, dict)
+            and metadata.get("shadow_validation_only") is True
+        )
         ticket: dict[str, Any] = {
             "id": f"TIC-{int(time.time() * 1000)}",
             "created_at": self.now(),
@@ -631,15 +686,26 @@ class HepiOpsCore:
             ticket["status"] = "PAPER_FILLED" if passed else "PAPER_BLOCKED"
             ticket["guard"] = "paper_only_no_broker_order"
         else:
-            ticket["guard"] = "live_order_not_implemented_and_requires_approval"
-            ticket["status"] = "APPROVAL_REQUIRED" if passed else "LIVE_CANDIDATE_BLOCKED"
-            if passed and (request_approval or bool(self.autotrade_policy().get("require_approval", True))):
+            if shadow_validation_only:
+                ticket["guard"] = "shadow_validation_only_no_approval_no_broker_order"
+                ticket["status"] = "SHADOW_VALIDATION_READY" if passed else "LIVE_CANDIDATE_BLOCKED"
+            elif passed and not bool(self.autotrade_policy().get("require_approval", True)):
+                ticket["guard"] = "delegated_signed_signal_external_executor"
+                ticket["status"] = "DELEGATED_SIGNAL_READY"
+            else:
+                ticket["guard"] = "live_order_not_implemented_and_requires_approval"
+                ticket["status"] = "APPROVAL_REQUIRED" if passed else "LIVE_CANDIDATE_BLOCKED"
+            if (
+                passed
+                and not shadow_validation_only
+                and (request_approval or bool(self.autotrade_policy().get("require_approval", True)))
+            ):
                 approval = self.create_approval(ticket)
                 ticket["approval_token"] = approval["token"]
                 ticket["approval_status"] = approval["status"]
         if (
             bool(self.telegram_policy().get("trade_reason_reports_enabled", True))
-            and ticket.get("status") in {"PAPER_FILLED", "APPROVAL_REQUIRED"}
+            and ticket.get("status") in {"PAPER_FILLED", "APPROVAL_REQUIRED", "DELEGATED_SIGNAL_READY"}
         ):
             side_label = "매수" if ticket["side"] == "BUY" else "매도"
             mode_label = "모의투자" if normalized_mode == "paper" else "실전 후보"
@@ -665,6 +731,20 @@ class HepiOpsCore:
                 "status": report.get("status"),
                 "reason": (report.get("policy") or {}).get("reason") if isinstance(report.get("policy"), dict) else "",
             }
+        if normalized_mode == "live_candidate" and passed:
+            try:
+                from stock_suite.signal_bridge import ShadowSignalPublisher
+
+                ticket["shadow_signal"] = ShadowSignalPublisher(
+                    self.shadow_signal_outbox,
+                    self.shadow_signal_secret_file,
+                ).publish(ticket)
+            except Exception as exc:
+                ticket["shadow_signal"] = {
+                    "published": False,
+                    "reason": "shadow_signal_publish_failed",
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                }
         self._append_jsonl(self.ticket_file, ticket)
         self.audit(
             "ORDER_TICKET",
@@ -1123,6 +1203,10 @@ class HepiOpsCore:
         return record
 
     def queue_telegram(self, text: str, message_type: str = "report", source: str = "ops", metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._telegram_queue_lock:
+            return self._queue_telegram_locked(text, message_type, source, metadata)
+
+    def _queue_telegram_locked(self, text: str, message_type: str = "report", source: str = "ops", metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         message_type = str(message_type or "report")
         source = str(source or "ops")
         text = str(text or "")
@@ -1210,7 +1294,7 @@ class HepiOpsCore:
                                 window_minutes=min_interval,
                             )
         record = {
-            "id": f"TG-{int(time.time() * 1000)}",
+            "id": f"TG-{time.time_ns()}",
             "created_at": self.now(),
             "status": "queued",
             "message_type": message_type,
@@ -1235,7 +1319,35 @@ class HepiOpsCore:
         return rows[-limit:] if limit else rows
 
     def telegram_dispatched_ids(self) -> set[str]:
-        return {str(row.get("outbox_id", "")) for row in self.telegram_dispatches() if row.get("outbox_id") and row.get("status") in {"sent", "dry_run", "skipped"}}
+        return {
+            str(row.get("outbox_id", ""))
+            for row in self.telegram_dispatches()
+            if row.get("outbox_id")
+            and row.get("status") in {"claimed_once", "sent", "dry_run", "skipped", "failed_terminal"}
+        }
+
+    def claim_single_delivery_telegram(self, outbox_record: dict[str, Any], source: str = "dispatcher") -> dict[str, Any] | None:
+        metadata = outbox_record.get("metadata") if isinstance(outbox_record.get("metadata"), dict) else {}
+        if metadata.get("single_delivery") is not True:
+            return None
+        outbox_id = str(outbox_record.get("id", ""))
+        if not outbox_id or outbox_id in self.telegram_dispatched_ids():
+            return None
+        record = {
+            "id": f"TGDCLAIM-{time.time_ns()}",
+            "created_at": self.now(),
+            "outbox_id": outbox_id,
+            "message_type": outbox_record.get("message_type"),
+            "source": source,
+            "status": "claimed_once",
+            "single_delivery": True,
+            "single_delivery_id": str(metadata.get("single_delivery_id") or metadata.get("incident_id") or ""),
+            "ok": True,
+            "sent": False,
+            "message": "단일 발송 사건의 첫 전송 시도를 선점했습니다.",
+        }
+        self._append_jsonl(self.telegram_dispatch_file, record)
+        return record
 
     def pending_telegram_outbox(self, limit: int = 20) -> list[dict[str, Any]]:
         dispatched = self.telegram_dispatched_ids()
@@ -1273,7 +1385,17 @@ class HepiOpsCore:
         }
 
     def record_telegram_dispatch(self, outbox_record: dict[str, Any], result: dict[str, Any], source: str = "dispatcher") -> dict[str, Any]:
-        status = "sent" if result.get("sent") else "dry_run" if result.get("ok") else "failed"
+        metadata = outbox_record.get("metadata") if isinstance(outbox_record.get("metadata"), dict) else {}
+        single_delivery = metadata.get("single_delivery") is True
+        status = (
+            "sent"
+            if result.get("sent")
+            else "dry_run"
+            if result.get("ok")
+            else "failed_terminal"
+            if single_delivery
+            else "failed"
+        )
         telegram_result = result.get("telegram") if isinstance(result.get("telegram"), dict) else {}
         telegram_message = telegram_result.get("result") if isinstance(telegram_result.get("result"), dict) else {}
         safe_result = {
@@ -1282,11 +1404,14 @@ class HepiOpsCore:
             "message": result.get("message", ""),
             "status": result.get("status", {}),
             "telegram_message_id": telegram_message.get("message_id"),
+            "delivery_status": result.get("delivery_status", ""),
+            "used_integrity_fallback": bool(result.get("used_integrity_fallback")),
+            "text_integrity": result.get("text_integrity", {}),
         }
         if "preview" in result:
             safe_result["preview"] = str(result.get("preview", ""))[:800]
         record = {
-            "id": f"TGD-{int(time.time() * 1000)}",
+            "id": f"TGD-{time.time_ns()}",
             "created_at": self.now(),
             "outbox_id": outbox_record.get("id"),
             "message_type": outbox_record.get("message_type"),
@@ -1295,6 +1420,8 @@ class HepiOpsCore:
             "ok": bool(result.get("ok")),
             "sent": bool(result.get("sent")),
             "message": result.get("message", ""),
+            "single_delivery": single_delivery,
+            "single_delivery_id": str(metadata.get("single_delivery_id") or metadata.get("incident_id") or ""),
             "result": safe_result,
         }
         self._append_jsonl(self.telegram_dispatch_file, record)

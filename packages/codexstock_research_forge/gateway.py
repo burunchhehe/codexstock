@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from .microstructure_worker import KisPollingMicrostructureProvider
 from .realtime import ReliableKisRealtimeCollector, WebsocketClientTransport, realtime_run_history, request_approval_key
 from .corporate_actions import OfficialCorporateActionEvidenceProvider, adjust_split_history
 from .hts_csv import import_csv as import_hts_csv, template as hts_csv_template
+from .instrument_contracts import contract_manifest, validate_instrument_snapshot
 
 
 RESEARCH_TOOL_NAMES = (
@@ -28,6 +30,16 @@ RESEARCH_TOOL_NAMES = (
     "research_corporate_action_register_verified",
     "research_corporate_action_query",
     "research_corporate_action_adjust_registered",
+    "research_corporate_action_reconcile",
+    "research_instrument_contracts",
+    "research_instrument_validate",
+    "research_shard_batch_create",
+    "research_shard_claim",
+    "research_shard_heartbeat",
+    "research_shard_finish",
+    "research_shard_status",
+    "research_stability_record",
+    "research_stability_audit",
     "research_strategy_validate",
     "research_experiment_create",
     "research_experiment_get",
@@ -93,6 +105,7 @@ RESEARCH_TOOL_NAMES = (
     "research_microstructure_worker_resume",
     "research_realtime_status",
     "research_realtime_start",
+    "research_realtime_resume",
     "research_realtime_runs",
     "research_hts_reference_register",
     "research_hts_csv_template",
@@ -160,7 +173,11 @@ def call_research_tool(
         actions = arguments.get("actions")
         if not isinstance(actions, list): raise ValueError("actions must be an array")
         verification = OfficialCorporateActionEvidenceProvider().verify(actions, float(arguments.get("timeout_seconds") or 15), int(arguments.get("max_document_bytes") or 10_000_000), int(arguments.get("attempts") or 3))
-        dataset = forge.corporate_actions().register(str(arguments.get("dataset_id") or ""), str(arguments.get("symbol") or ""), verification["actions"], bool(arguments.get("complete_history")), True)
+        dataset = forge.corporate_actions().register(
+            str(arguments.get("dataset_id") or ""), str(arguments.get("symbol") or ""), verification["actions"],
+            bool(arguments.get("complete_history")), True,
+            str(arguments.get("history_start") or ""), str(arguments.get("history_end") or ""),
+        )
         return {"ok": True, "dataset": dataset, "source_verification": {key: verification[key] for key in ("documents", "document_count", "verified_at", "network_checked", "read_only", "order_allowed")}}
     if name == "research_corporate_action_query":
         return forge.corporate_actions().query(str(arguments.get("dataset_id") or ""), str(arguments.get("start") or ""), str(arguments.get("end") or ""))
@@ -168,6 +185,32 @@ def call_research_tool(
         rows = arguments.get("rows")
         if not isinstance(rows, list): raise ValueError("rows must be an array")
         return forge.corporate_actions().adjust(str(arguments.get("dataset_id") or ""), rows)
+    if name == "research_corporate_action_reconcile":
+        symbols = arguments.get("symbols")
+        if not isinstance(symbols, list): raise ValueError("symbols must be an array")
+        return forge.corporate_actions().reconcile([str(value) for value in symbols], str(arguments.get("coverage_start") or ""), str(arguments.get("coverage_end") or ""))
+    if name == "research_instrument_contracts":
+        return contract_manifest()
+    if name == "research_instrument_validate":
+        return validate_instrument_snapshot(_object(arguments.get("snapshot"), "snapshot"))
+    if name == "research_shard_batch_create":
+        payloads = arguments.get("payloads")
+        if not isinstance(payloads, list): raise ValueError("payloads must be an array")
+        return forge.shards().create_batch(str(arguments.get("job_type") or ""), payloads)
+    if name == "research_shard_claim":
+        return forge.shards().claim(str(arguments.get("batch_id") or ""), str(arguments.get("worker_id") or ""), int(arguments.get("lease_seconds") or 300))
+    if name == "research_shard_heartbeat":
+        return forge.shards().heartbeat(str(arguments.get("batch_id") or ""), str(arguments.get("shard_id") or ""), str(arguments.get("worker_token") or ""))
+    if name == "research_shard_finish":
+        result = arguments.get("result")
+        if result is not None and not isinstance(result, dict): raise ValueError("result must be an object")
+        return forge.shards().finish(str(arguments.get("batch_id") or ""), str(arguments.get("shard_id") or ""), str(arguments.get("worker_token") or ""), result=result, error=str(arguments.get("error") or ""), retryable=bool(arguments.get("retryable")))
+    if name == "research_shard_status":
+        return forge.shards().status(str(arguments.get("batch_id") or ""))
+    if name == "research_stability_record":
+        return forge.stability().record_dashboard(_object(arguments.get("dashboard"), "dashboard"), int(arguments.get("min_interval_seconds") or 300))
+    if name == "research_stability_audit":
+        return forge.stability().audit(int(arguments.get("window_days") or 30), int(arguments.get("max_gap_seconds") or 900))
     if name == "research_strategy_validate":
         strategy = _strategy(arguments.get("strategy"))
         errors = strategy.validate()
@@ -266,6 +309,18 @@ def call_research_tool(
         collector = ReliableKisRealtimeCollector(forge.registry.root.parent / "realtime", forge.microstructure(), lambda: WebsocketClientTransport(ws_url), approval)
         max_messages = int(arguments["max_messages"]) if arguments.get("max_messages") is not None else 1000
         return collector.run([str(value) for value in symbols], max_messages, int(arguments.get("max_reconnects") or 20), float(arguments.get("heartbeat_timeout") or 30), duration_seconds=float(arguments.get("duration_seconds") or 0))
+    if name == "research_realtime_resume":
+        import sys
+        from dataclasses import replace
+        if str(repo_root / "app") not in sys.path: sys.path.insert(0, str(repo_root / "app"))
+        from integrations import IntegrationSettings, KIS_MOCK_BASE_URL, KIS_REAL_BASE_URL
+        settings = replace(IntegrationSettings.load(repo_root), kis_readonly=True, live_trading=False)
+        if not settings.kis_configured: raise ValueError("KIS quotation credentials are not configured")
+        base_url = settings.kis_base_url or (KIS_MOCK_BASE_URL if settings.kis_use_mock else KIS_REAL_BASE_URL)
+        approval = request_approval_key(base_url, settings.kis_app_key, settings.kis_app_secret)
+        ws_url = "ws://ops.koreainvestment.com:31000" if settings.kis_use_mock else "ws://ops.koreainvestment.com:21000"
+        collector = ReliableKisRealtimeCollector(forge.registry.root.parent / "realtime", forge.microstructure(), lambda: WebsocketClientTransport(ws_url), approval)
+        return collector.resume_interrupted(int(arguments.get("max_reconnects") or 20), float(arguments.get("heartbeat_timeout") or 30))
     if name == "research_realtime_runs":
         return realtime_run_history(forge.registry.root.parent / "realtime", int(arguments.get("limit") or 50))
     if name == "research_microstructure_quality":
@@ -458,7 +513,11 @@ def call_research_tool(
         job_type = str(arguments.get("job_type") or "")
         if job_type not in {"backtest", "strict_walk_forward", "collection", "microstructure"}:
             raise ValueError("job_type must be backtest, strict_walk_forward, collection, or microstructure")
-        payload = _object(arguments.get("payload"), "payload")
+        payload = _validate_async_submit_payload(
+            job_type,
+            _object(arguments.get("payload"), "payload"),
+            forge,
+        )
         payload["adapter"] = adapter_name
         return {"ok": True, "job": forge.jobs().submit(job_type, payload, _async_handler(job_type, runtime_root, repo_root))}
     if name == "research_async_retry":
@@ -514,6 +573,103 @@ def _object(value: Any, label: str, *, required: bool = True) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be an object")
     return dict(value)
+
+
+def _validate_async_submit_payload(
+    job_type: str,
+    payload: dict[str, Any],
+    forge: ResearchForge,
+) -> dict[str, Any]:
+    normalized = dict(payload)
+    if job_type in {"backtest", "strict_walk_forward"}:
+        experiment_id = str(normalized.get("experiment_id") or "").strip()
+        if not experiment_id:
+            raise ValueError(f"{job_type} requires a non-empty experiment_id")
+        forge.registry.get(experiment_id)
+        normalized["experiment_id"] = experiment_id
+        if job_type == "strict_walk_forward":
+            for key in ("fast_values", "slow_values"):
+                if normalized.get(key) is not None and not isinstance(normalized.get(key), list):
+                    raise ValueError(f"{key} must be an array")
+            for key, maximum in (
+                ("purge_days", 365),
+                ("embargo_days", 365),
+                ("purge_rows", 10_000),
+                ("embargo_rows", 10_000),
+            ):
+                value = int(normalized.get(key) or 0)
+                if not 0 <= value <= maximum:
+                    raise ValueError(f"{key} must be between 0 and {maximum}")
+                normalized[key] = value
+        return normalized
+
+    symbols = normalized.get("symbols")
+    if symbols is not None and not isinstance(symbols, list):
+        raise ValueError("symbols must be an array")
+    if isinstance(symbols, list):
+        normalized_symbols = [str(value).strip().upper() for value in symbols]
+        if any(not value or not value.isalnum() for value in normalized_symbols):
+            raise ValueError("symbols must contain only non-empty alphanumeric values")
+        normalized["symbols"] = list(dict.fromkeys(normalized_symbols))
+
+    if job_type == "microstructure":
+        normalized_symbols = normalized.get("symbols") or []
+        if not 1 <= len(normalized_symbols) <= 100:
+            raise ValueError("microstructure requires 1..100 symbols")
+        interval_seconds = float(normalized.get("interval_seconds") or 1)
+        max_cycles = int(normalized.get("max_cycles") if normalized.get("max_cycles") is not None else 1)
+        gap_seconds = int(normalized.get("gap_seconds") or 10)
+        if not 0.05 <= interval_seconds <= 60:
+            raise ValueError("interval_seconds must be between 0.05 and 60")
+        if not 0 <= max_cycles <= 100_000:
+            raise ValueError("max_cycles must be between 0 and 100000")
+        if not 1 <= gap_seconds <= 3600:
+            raise ValueError("gap_seconds must be between 1 and 3600")
+        normalized.update(
+            {
+                "interval_seconds": interval_seconds,
+                "max_cycles": max_cycles,
+                "gap_seconds": gap_seconds,
+            }
+        )
+        return normalized
+
+    provider = str(normalized.get("provider") or "mock").strip().lower()
+    if provider not in {"mock", "kis"}:
+        raise ValueError("collection provider must be mock or kis")
+    start = str(normalized.get("start") or "").strip()
+    end = str(normalized.get("end") or "").strip()
+    if not start or not end:
+        raise ValueError("collection requires start and end dates in YYYY-MM-DD format")
+    try:
+        start_date = date.fromisoformat(start)
+        end_date = date.fromisoformat(end)
+    except ValueError:
+        raise ValueError("collection start and end must be ISO dates in YYYY-MM-DD format") from None
+    if end_date < start_date:
+        raise ValueError("collection end date precedes start date")
+    timeframe = str(normalized.get("timeframe") or "1d").strip().lower()
+    if timeframe not in {"1d", "minute"}:
+        raise ValueError("collection timeframe must be 1d or minute")
+    retry_max_attempts = int(normalized.get("retry_max_attempts") or 3)
+    retry_base_seconds = float(
+        normalized.get("retry_base_seconds")
+        if normalized.get("retry_base_seconds") is not None
+        else 0.25
+    )
+    if not 1 <= retry_max_attempts <= 10 or not 0 <= retry_base_seconds <= 30:
+        raise ValueError("retry policy must use 1..10 attempts and 0..30 base seconds")
+    normalized.update(
+        {
+            "provider": provider,
+            "start": start,
+            "end": end,
+            "timeframe": timeframe,
+            "retry_max_attempts": retry_max_attempts,
+            "retry_base_seconds": retry_base_seconds,
+        }
+    )
+    return normalized
 
 
 def _async_handler(job_type: str, runtime_root: Path, repo_root: Path):

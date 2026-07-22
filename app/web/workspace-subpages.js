@@ -33,9 +33,7 @@
     trading: {
       label: "AI 감독·승인",
       groups: [
-        group("guide", "감독 안내", "AI 후보를 사람이 안전하게 감독하는 방법을 설명합니다.", [":scope > .page-role-panel", ":scope > .page-action-guide"], ["실전과 Paper 구분을 확인합니다.", "후보 생성과 실제 주문 전송의 차이를 확인합니다."], "감독 절차와 안전 원칙", "승인 전에는 주문 티켓만 만들어져야 합니다."),
-        group("market", "차트·판단", "종목 차트와 AI 판단 근거를 집중해서 확인합니다.", [":scope > .trade-layout > .chart-panel"], ["시세 시각과 통화를 확인합니다.", "진입 이유, 무효화 조건, 손절 기준을 함께 봅니다."], "차트와 판단 근거", "현재가와 판단에 사용한 스냅샷 시각이 다르면 재검증하세요."),
-        group("ticket", "주문·Paper", "후보 주문표와 Paper 실행 결과를 확인합니다.", [":scope > .trade-layout > .paper-panel"], ["수량·단가·예상 주문금액을 확인합니다.", "Paper인지 실전 승인 대기인지 처리 구분을 확인합니다."], "주문 후보와 Paper 결과", "실전 주문은 별도 최종 승인과 안전 게이트가 필요합니다."),
+        group("market", "차트·판단", "종목 차트와 AI가 압축한 통합 판단을 한 화면에서 확인합니다.", [":scope > .trade-layout > .watchlist-panel", ":scope > .trade-layout > .chart-panel"], ["확인할 종목과 시세 시각을 선택합니다.", "AI 통합 판단에서 선정 이유와 반대 근거를 확인합니다.", "무효화 조건과 안전 게이트를 확인합니다."], "차트와 AI 판단 요약", "분봉·호가 원본은 AI 내부 검증에 사용되며, 이 화면은 실전 주문을 실행하지 않습니다."),
       ],
     },
     research: {
@@ -51,7 +49,7 @@
       label: "설정·기록",
       groups: [
         group("overview", "설정 안내", "연구·운용·리스크 역할과 현재 환경을 설명합니다.", [":scope > .settings-hero-panel"], ["각 역할이 분리되어 있는지 확인합니다.", "비밀값은 화면에 직접 표시하지 않습니다."], "역할과 환경 안내", "설정 변경 전 현재 값을 기록하세요."),
-        group("engines", "하위엔진", "9개 하위엔진의 연결·작업·진행률을 봅니다.", [":scope > .external-engine-ops-panel"], ["연결 수와 경고 수를 먼저 봅니다.", "사용 중인 엔진의 진행률과 예상 완료시간을 확인합니다."], "엔진 연결과 작업 상태", "하위엔진은 연구 결과만 반환하며 주문 권한이 없어야 합니다."),
+        group("engines", "하위엔진", "10개 하위엔진의 연결·작업·진행률을 봅니다.", [":scope > .external-engine-ops-panel"], ["연결 수와 경고 수를 먼저 봅니다.", "사용 중인 엔진의 진행률과 예상 완료시간을 확인합니다."], "엔진 연결과 작업 상태", "하위엔진은 연구 결과만 반환하며 주문 권한이 없어야 합니다."),
         group("models", "AI 직원 모델", "운용·연구 직원이 사용할 AI 모델을 설정합니다.", [":scope > .staff-brain-settings-panel"], ["직원 역할에 맞는 모델을 선택합니다.", "저장 뒤 실제 적용 모델을 다시 확인합니다."], "직원별 모델 설정", "리스크 관리 규칙은 AI 모델과 별도로 항상 적용됩니다."),
         group("sharing", "소개·배포", "소개문과 친구용 안전 배포 패키지를 준비합니다.", [":scope > .program-intro-panel", ":scope > .friend-release-panel"], ["배포 준비도 검사를 먼저 실행합니다.", "API 키·계좌·개인 로그가 빠졌는지 확인합니다."], "소개문과 안전 배포 자료", "개인 데이터 폴더는 프로젝트 코드와 함께 배포하지 마세요."),
         group("records", "운영 기록", "리스크, API, 매매일지, AI 근무일지와 로그를 확인합니다.", [":scope > details.merged-workspace-panel"], ["고급 관리 상자를 펼칩니다.", "오류·매매·복기 기록을 날짜순으로 확인합니다."], "운영·감사 기록", "기록이 바뀌면 원본 시각과 생성 ID를 함께 확인하세요."),
@@ -127,6 +125,7 @@
     if (toolbar) return toolbar;
     toolbar = document.createElement("div");
     toolbar.className = "workspace-subview-nav";
+    toolbar.classList.toggle("single-view", config.groups.length === 1);
     toolbar.dataset.subviewPage = pageId;
     toolbar.hidden = true;
     toolbar.setAttribute("aria-label", `${config.label} 하위 보기`);
@@ -198,6 +197,7 @@
     const active = config.groups[index];
     allManagedNodes(page, config).forEach((node) => node.classList.add("workspace-subview-hidden"));
     nodesFor(page, active).forEach((node) => node.classList.remove("workspace-subview-hidden"));
+    page.dataset.activeSubview = active.id;
     toolbar.dataset.activeSubview = active.id;
     toolbar.querySelector("[data-subview-current]").textContent = active.label;
     toolbar.querySelector("[data-subview-summary]").textContent = active.description;

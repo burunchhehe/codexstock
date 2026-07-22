@@ -14,6 +14,7 @@ from app.runtime_paths import (
     USER_DATA_ENV_KEY,
     USE_REPO_DATA_ENV_KEY,
     active_data_root,
+    default_user_data_root,
     ensure_runtime_root_contract,
     read_runtime_root_contract,
     runtime_root_resolution,
@@ -45,6 +46,15 @@ class RuntimeRootContractTests(unittest.TestCase):
         self.assertEqual(user_data, resolved)
         self.assertEqual("verified_runtime_root_contract", resolution["source"])
         self.assertTrue(resolution["execution_account_independent"])
+
+    def test_default_root_uses_temp_when_home_is_unavailable(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "app.runtime_paths.Path.home",
+            side_effect=RuntimeError("home unavailable"),
+        ):
+            resolved = default_user_data_root()
+
+        self.assertEqual(Path(tempfile.gettempdir()) / "CodexStock" / "data", resolved)
 
     def test_explicit_environment_overrides_a_valid_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

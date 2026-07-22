@@ -155,6 +155,27 @@ class ClassifierTests(unittest.TestCase):
                 IssueType.DIAGNOSTIC_ENDPOINT_UNAVAILABLE,
             ),
             ({"status": "degraded"}, IssueType.UNKNOWN),
+            (
+                {
+                    "classification": "SIGNED_SIGNAL_MISSING",
+                    "trading_pipeline_healthy": False,
+                },
+                IssueType.SIGNED_SIGNAL_MISSING,
+            ),
+            (
+                {
+                    "classification": "MARKET_SCAN_STALLED",
+                    "trading_pipeline_healthy": False,
+                },
+                IssueType.MARKET_SCAN_STALLED,
+            ),
+            (
+                {
+                    "classification": "CANDIDATE_VALIDATION_STALLED",
+                    "trading_pipeline_healthy": False,
+                },
+                IssueType.CANDIDATE_VALIDATION_STALLED,
+            ),
             ({"status": "healthy"}, IssueType.NO_ISSUE),
         ]
         for observation, expected in cases:
@@ -495,6 +516,20 @@ class ExecutionTests(unittest.TestCase):
 
 
 class CycleTests(unittest.TestCase):
+    def test_pipeline_report_only_does_not_mark_incident_recovered(self) -> None:
+        store = FakeStore()
+        engine = InternalDeveloperEngine(store)
+
+        result = engine.run_cycle({
+            "classification": "LEGACY_APPROVAL_GATE_ACTIVE",
+            "trading_pipeline_healthy": False,
+        })
+
+        self.assertEqual("needs_code_fix", result["status"])
+        self.assertEqual("NEEDS_CODE_FIX", store.incidents[result["incident_id"]]["state"])
+        self.assertEqual("approval_mode_contract", result["diagnostic"]["component"])
+        self.assertIn("legacy approval token", result["diagnostic"]["root_cause"])
+
     def test_healthy_and_busy_progressing_cycles_do_not_open_incidents(self) -> None:
         store = FakeStore()
         engine = InternalDeveloperEngine(store)

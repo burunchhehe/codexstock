@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#071414">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="코덱스스톡 개인용 모바일 조종석">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <title>코덱스스톡 모바일</title>
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <div class="request-progress" id="requestProgress" aria-hidden="true"></div>
+
+  <header class="app-header">
+    <div class="brand-lockup">
+      <div class="brand-mark" aria-hidden="true">CS</div>
+      <div>
+        <p class="eyebrow">PRIVATE MOBILE CONSOLE</p>
+        <h1>코덱스스톡</h1>
+      </div>
+    </div>
+    <button class="icon-button" id="settingsButton" type="button" aria-label="연결 설정">설정</button>
+  </header>
+
+  <main class="app-main">
+    <section class="connection-banner is-disconnected" id="connectionBanner" aria-live="polite">
+      <span class="signal-dot"></span>
+      <div>
+        <strong id="connectionTitle">PC 본체 연결 필요</strong>
+        <p id="connectionDetail">설정에서 PC 주소와 일회용 연결 코드를 입력하세요.</p>
+      </div>
+      <button class="text-button" id="connectShortcut" type="button">연결</button>
+    </section>
+
+    <section class="hero-card" id="heroCard">
+      <div class="hero-orbit" aria-hidden="true"></div>
+      <div class="hero-copy">
+        <p class="eyebrow">현재 운영 상태</p>
+        <h2 id="overallLabel">연결을 기다리는 중</h2>
+        <p id="overallMessage">휴대폰에는 증권사 키가 저장되지 않습니다.</p>
+      </div>
+      <div class="hero-time">
+        <span id="marketPhase">대기</span>
+        <strong id="clockText">--:--</strong>
+      </div>
+    </section>
+
+    <section class="focus-card" aria-labelledby="focusTitle">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">WORK PRIORITY</p>
+          <h2 id="focusTitle">업무 집중도</h2>
+        </div>
+        <span class="status-pill neutral" id="focusMode">확인 중</span>
+      </div>
+      <div class="focus-track" aria-label="매매와 연구 집중도">
+        <div class="focus-fill" id="focusFill" style="width: 50%"></div>
+      </div>
+      <div class="focus-legend">
+        <span>매매 <strong id="tradingFocus">--%</strong></span>
+        <span>연구 <strong id="researchFocus">--%</strong></span>
+      </div>
+      <p class="card-note" id="focusReason">본체 연결 후 현재 우선 업무를 표시합니다.</p>
+    </section>
+
+    <section class="tab-panel is-active" id="homePanel" data-panel="home">
+      <div class="metric-grid">
+        <article class="metric-card">
+          <span>자동운용</span>
+          <strong id="operationMode">-</strong>
+          <small id="capitalLimit">운용한도 확인 중</small>
+        </article>
+        <article class="metric-card">
+          <span>외부 실행기</span>
+          <strong id="executorState">-</strong>
+          <small id="executorDetail">신호 대사 확인 중</small>
+        </article>
+        <article class="metric-card">
+          <span>매매 파이프라인</span>
+          <strong id="pipelineState">-</strong>
+          <small id="pipelineDetail">후보 흐름 확인 중</small>
+        </article>
+        <article class="metric-card">
+          <span>내부 개발자</span>
+          <strong id="developerState">-</strong>
+          <small id="developerDetail">장애 감시 확인 중</small>
+        </article>
+      </div>
+
+      <section class="content-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">AI COMPANY</p>
+            <h2>직원 현재 업무</h2>
+          </div>
+          <button class="quiet-button" data-refresh="summary" type="button">새로고침</button>
+        </div>
+        <div class="staff-list" id="staffList">
+          <div class="empty-state">본체 연결 후 직원 업무가 표시됩니다.</div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">SPECIALIST ENGINES</p>
+            <h2>하위엔진</h2>
+          </div>
+          <button class="quiet-button" id="engineRefresh" type="button">상태 확인</button>
+        </div>
+        <div class="engine-summary" id="engineSummary">필요할 때만 불러와 휴대폰과 PC 부하를 줄입니다.</div>
+        <div class="engine-list" id="engineList"></div>
+      </section>
+    </section>
+
+    <section class="tab-panel" id="candidatePanel" data-panel="candidates">
+      <div class="section-heading page-heading">
+        <div>
+          <p class="eyebrow">CANDIDATE BOARD</p>
+          <h2>추천·관찰 후보</h2>
+          <p>점수보다 통과 근거와 차단 이유를 함께 봅니다.</p>
+        </div>
+        <button class="quiet-button" data-refresh="candidates" type="button">갱신</button>
+      </div>
+      <div class="regime-strip" id="regimeStrip">시장 국면 확인 중</div>
+      <div class="candidate-list" id="candidateList">
+        <div class="empty-state">후보 데이터를 아직 불러오지 않았습니다.</div>
+      </div>
+    </section>
+
+    <section class="tab-panel" id="activityPanel" data-panel="activity">
+      <div class="section-heading page-heading">
+        <div>
+          <p class="eyebrow">EVIDENCE LEDGER</p>
+          <h2>오늘 기록</h2>
+          <p>실제 전송, 차단, 후보, 손익을 구분합니다.</p>
+        </div>
+        <button class="quiet-button" data-refresh="activity" type="button">갱신</button>
+      </div>
+      <div class="trade-counts" id="tradeCounts"></div>
+      <section class="content-card">
+        <div class="section-heading">
+          <h3>매매·후보 기록</h3>
+          <span class="status-pill neutral" id="tradeDate">-</span>
+        </div>
+        <p class="card-note" id="tradeHeadline">기록을 불러오지 않았습니다.</p>
+        <div class="timeline-list" id="tradeList"></div>
+      </section>
+      <section class="content-card">
+        <div class="section-heading">
+          <h3>잔고·손익 요약</h3>
+          <button class="quiet-button" id="portfolioRefresh" type="button">확인</button>
+        </div>
+        <div class="portfolio-summary" id="portfolioSummary">요청할 때만 안전하게 조회합니다.</div>
+        <div class="position-list" id="positionList"></div>
+      </section>
+      <section class="content-card">
+        <div class="section-heading">
+          <h3>알림과 복구</h3>
+          <span class="status-pill neutral" id="alertCount">0건</span>
+        </div>
+        <div class="alert-list" id="alertList"></div>
+      </section>
+    </section>
+
+    <section class="tab-panel assistant-panel" id="assistantPanel" data-panel="assistant">
+      <div class="section-heading page-heading">
+        <div>
+          <p class="eyebrow">CODEXSTOCK SECRETARY</p>
+          <h2>비서에게 묻기</h2>
+          <p>상태와 이유를 설명합니다. 주문·승인·한도 변경은 차단됩니다.</p>
+        </div>
+      </div>
+      <div class="quick-prompts" id="quickPrompts">
+        <button type="button" data-prompt="지금 직원들 뭐해?">직원들 뭐해?</button>
+        <button type="button" data-prompt="오늘 매매한 것과 이유를 알려줘">오늘 매매</button>
+        <button type="button" data-prompt="현재 기능 이상 없어?">기능 상태</button>
+        <button type="button" data-prompt="지금 후보와 차단 이유 알려줘">후보 이유</button>
+      </div>
+      <div class="chat-thread" id="chatThread" aria-live="polite">
+        <article class="chat-message assistant">
+          <span>코덱스스톡 비서</span>
+          <p>PC 본체와 연결되면 지금 무엇을 하는지 쉽게 설명해드릴게요.</p>
+        </article>
+      </div>
+      <form class="chat-composer" id="chatForm">
+        <label class="sr-only" for="chatInput">비서에게 질문</label>
+        <textarea id="chatInput" rows="1" maxlength="500" placeholder="예: 오늘 왜 이 종목을 샀어?"></textarea>
+        <button type="submit">보내기</button>
+      </form>
+    </section>
+
+    <section class="danger-zone">
+      <div>
+        <p class="eyebrow">SAFETY CONTROL</p>
+        <h2>신규 자동운용 즉시 정지</h2>
+        <p>주문 시작이나 위험 한도 완화는 휴대폰에서 제공하지 않습니다.</p>
+      </div>
+      <button class="danger-button" id="emergencyButton" type="button">긴급정지</button>
+    </section>
+  </main>
+
+  <nav class="bottom-nav" aria-label="주 메뉴">
+    <button class="is-active" type="button" data-tab="home"><span>01</span>홈</button>
+    <button type="button" data-tab="candidates"><span>02</span>후보</button>
+    <button type="button" data-tab="activity"><span>03</span>기록</button>
+    <button type="button" data-tab="assistant"><span>04</span>비서</button>
+  </nav>
+
+  <dialog class="sheet-dialog" id="settingsDialog">
+    <form method="dialog" class="sheet-card" id="settingsForm">
+      <div class="sheet-handle"></div>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">PRIVATE CONNECTION</p>
+          <h2>PC 본체 연결</h2>
+        </div>
+        <button class="close-button" value="cancel" aria-label="닫기">닫기</button>
+      </div>
+      <p class="sheet-explanation">PC에서 만든 10분짜리 일회용 코드로 이 휴대폰만 연결합니다. KIS·DART·텔레그램 키는 PC 밖으로 나오지 않습니다.</p>
+      <label>
+        <span>PC HTTPS 주소</span>
+        <input id="serverUrlInput" type="url" inputmode="url" placeholder="https://내-PC주소" autocomplete="url">
+      </label>
+      <label>
+        <span>일회용 연결 코드</span>
+        <input id="pairingCodeInput" type="text" inputmode="numeric" maxlength="9" placeholder="1234 5678" autocomplete="one-time-code">
+      </label>
+      <label>
+        <span>기기 이름</span>
+        <input id="deviceNameInput" type="text" maxlength="48" placeholder="진우 휴대폰">
+      </label>
+      <div class="sheet-actions">
+        <button class="primary-button" id="pairButton" type="button">안전하게 연결</button>
+        <button class="secondary-button" id="disconnectButton" type="button">이 기기 연결 해제</button>
+      </div>
+      <details>
+        <summary>PC에서 연결 코드 만드는 법</summary>
+        <code>python app/mobile_pairing_cli.py create</code>
+      </details>
+    </form>
+  </dialog>
+
+  <dialog class="sheet-dialog danger-dialog" id="emergencyDialog">
+    <form method="dialog" class="sheet-card" id="emergencyForm">
+      <div class="sheet-handle"></div>
+      <p class="eyebrow danger-text">EMERGENCY STOP</p>
+      <h2>신규 자동운용을 멈출까요?</h2>
+      <p class="sheet-explanation">자동운용과 연구 데몬을 정지하고 신규 주문 후보를 차단합니다. 이미 증권사에 접수된 주문의 취소를 보장하는 버튼은 아닙니다.</p>
+      <label>
+        <span>확인을 위해 긴급정지 입력</span>
+        <input id="emergencyConfirmInput" type="text" autocomplete="off" placeholder="긴급정지">
+      </label>
+      <div class="sheet-actions horizontal">
+        <button class="secondary-button" value="cancel">취소</button>
+        <button class="danger-button" id="confirmEmergencyButton" type="button">정지 실행</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>

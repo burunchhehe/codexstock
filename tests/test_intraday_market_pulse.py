@@ -30,6 +30,59 @@ class IntradayMarketPulseTests(unittest.TestCase):
             for name in ("amount", "volume", "gainers", "losers", "foreign", "institution")
         }
 
+    def test_candidate_brief_applies_account_affordability_and_lanes(self):
+        radar = {
+            "ok": True,
+            "generated_at": "2026-07-21T11:30:00+09:00",
+            "items": [
+                {
+                    "symbol": "005930",
+                    "name": "삼성전자",
+                    "price": 256_000,
+                    "change_pct": 5.0,
+                    "score": 80.0,
+                    "avg_strength": 138.0,
+                    "minute_momentum_pct": 0.5,
+                    "action": "단타 관찰",
+                },
+                {
+                    "symbol": "004310",
+                    "name": "현대약품",
+                    "price": 7_200,
+                    "change_pct": 16.0,
+                    "score": 68.0,
+                    "avg_strength": 110.0,
+                    "minute_momentum_pct": 0.3,
+                    "action": "후보 유지",
+                },
+                {
+                    "symbol": "218150",
+                    "name": "미래생명자원",
+                    "price": 3_000,
+                    "change_pct": 13.0,
+                    "score": 40.0,
+                    "avg_strength": 90.0,
+                    "minute_momentum_pct": -1.0,
+                    "action": "회피/대기",
+                    "reason": "분봉 약세",
+                },
+            ],
+        }
+        account = {"summary": {"available_cash": 298_000, "total_value": 298_000}}
+        policy = {"delegated_live_max_position_cash_pct": 15}
+
+        brief = suite._build_intraday_candidate_brief(radar, account, policy)
+
+        self.assertEqual(44_700, brief["position_limit_krw"])
+        lanes = {row["symbol"]: row["lane"] for row in [*brief["shortlist"], *brief["rejected"]]}
+        self.assertEqual("한도초과", lanes["005930"])
+        self.assertEqual("실행검토", lanes["004310"])
+        self.assertEqual("제외", lanes["218150"])
+        self.assertNotIn("005930", {row["symbol"] for row in brief["shortlist"]})
+        self.assertIn("005930", {row["symbol"] for row in brief["rejected"]})
+        self.assertIn("현대약품", brief["text"])
+        self.assertFalse(brief["live_order_allowed"])
+
     @patch.object(suite, "_read_jsonl", return_value=[])
     def test_first_pulse_is_baseline_not_false_rapid_alert(self, _read_jsonl):
         result = suite.build_intraday_market_pulse(
@@ -183,6 +236,42 @@ class IntradayMarketPulseTests(unittest.TestCase):
         self.assertEqual("005930", candidates[0]["symbol"])
         self.assertEqual("provisional_detail_validation", candidates[0]["candidate_validation_status"])
         self.assertFalse(candidates[0]["score_allowed"])
+        self.assertFalse(candidates[0]["live_order_allowed"])
+
+    @patch.object(suite, "_read_jsonl", return_value=[])
+    def test_quote_enriched_gainer_enters_detail_validation_lane(self, _read_jsonl):
+        row = {
+            "rank": 18,
+            "symbol": "004310",
+            "name": "Hyundai Pharm",
+            "price": 7_000,
+            "change_pct": 18.0,
+            "amount": 15_000_000_000,
+            "volume": 2_000_000,
+            "detail_quote_validated": True,
+        }
+        probes = {
+            "amount": lambda: {"ok": True, "items": []},
+            "volume": lambda: {"ok": True, "items": []},
+            "gainers": lambda: {"ok": True, "items": [dict(row)]},
+            "losers": lambda: {"ok": True, "items": []},
+            "foreign": lambda: {"ok": True, "items": []},
+            "institution": lambda: {"ok": True, "items": []},
+        }
+
+        pulse = suite.build_intraday_market_pulse(
+            persist=False,
+            force=True,
+            probe_overrides=probes,
+        )
+
+        item = pulse["items"][0]
+        self.assertTrue(item["detail_quote_validated"])
+        self.assertTrue(item["provisional_for_detail_radar"])
+        self.assertFalse(item["verified_for_live_radar"])
+        candidates = suite._marketwide_intraday_candidate_pool(limit=3, pulse=pulse)
+        self.assertEqual(["004310"], [candidate["symbol"] for candidate in candidates])
+        self.assertEqual("provisional_detail_validation", candidates[0]["candidate_validation_status"])
         self.assertFalse(candidates[0]["live_order_allowed"])
 
     @patch.object(suite, "_read_jsonl", return_value=[])
@@ -363,6 +452,35 @@ class IntradayMarketPulseTests(unittest.TestCase):
         self.assertLessEqual(max_active, 3)
         self.assertEqual(result["count"], 4)
         self.assertEqual(result["detail_failure_count"], 0)
+
+    def test_minute_radar_filters_unaffordable_names_before_detail_reads(self):
+        pool = [
+            {"symbol": "111111", "name": "고가주", "price": 80_000, "score": 99},
+            {"symbol": "222222", "name": "매수가능주", "price": 20_000, "score": 80},
+        ]
+        quote = {"ok": True, "name": "매수가능주", "price": 20_000, "change_pct": 3.0}
+        detail = {
+            "ok": True,
+            "momentum_pct": 0.5,
+            "avg_strength": 115,
+            "latest_strength": 118,
+            "buy_pressure": 12,
+            "latest": {"time": "100000"},
+        }
+        with (
+            patch.object(suite, "_marketwide_intraday_candidate_pool", return_value=pool),
+            patch.object(suite, "_verified_external_signal_candidates", return_value=[]),
+            patch.object(suite, "live_quote", return_value=quote),
+            patch.object(suite, "live_minute_history", return_value=detail),
+            patch.object(suite, "live_time_conclusion", return_value=detail),
+        ):
+            result = suite.build_intraday_minute_radar(
+                limit=1,
+                persist=False,
+                market_pulse={"ok": True, "items": pool},
+                max_unit_price=44_824,
+            )
+        self.assertEqual(["222222"], [row["symbol"] for row in result["items"]])
 
     def test_market_focus_cycle_runs_real_read_only_pulse(self):
         daemon = suite.AiResearchDaemon()

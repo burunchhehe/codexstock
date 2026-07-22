@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from math import isfinite
 from pathlib import Path
 from types import SimpleNamespace
@@ -133,6 +134,40 @@ class ExternalEngineImprovementTests(unittest.TestCase):
         self.assertLessEqual(two_engines["verified_lesson"]["candidate_score_delta"], 2.0)
         self.assertLessEqual(overlay["score_delta"], 2.0)
         self.assertFalse(overlay["direct_order_authority"])
+
+    def test_verified_engine_lesson_changes_candidate_score_with_trace(self) -> None:
+        from app import stock_suite_app as stock_app
+
+        insight = {
+            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "learning_score": 70,
+            "symbol_bias": {"005930": 2.0},
+            "replay_symbol_bias": {},
+            "live_realized_symbol_bias": {},
+            "external_engine_symbol_bias": {"005930": 2.0},
+            "external_engine_score_evidence": [{
+                "lesson_hash": "lesson-verified-1",
+                "symbol": "005930",
+                "score_delta": 2.0,
+                "strategy_corroborated": True,
+                "score_eligible": True,
+            }],
+            "learning_evidence_fingerprint": "evidence-root-1",
+            "reflection_learning_evidence": [],
+            "live_realized_evidence": [],
+            "replay_bias_evidence": [],
+        }
+        bias = stock_app._learning_bias_for_candidate(
+            {"symbol": "005930", "raw_score": 60, "amount": 2_000_000_000},
+            insight,
+        )
+
+        self.assertEqual(2.0, bias["score_delta"])
+        self.assertTrue(bias["external_engine_memory_linked"])
+        self.assertEqual(1, bias["external_engine_evidence_count"])
+        self.assertEqual(["lesson-verified-1"], bias["evidence_ids"])
+        self.assertTrue(bias["eligible_for_score"])
+        self.assertTrue(bias["source_delta_reconciled"])
 
     def test_quality_failure_is_queued_for_retraining_not_scoring(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -454,6 +489,12 @@ class ExternalEngineImprovementTests(unittest.TestCase):
         self.assertEqual(0, resolution["active_count"])
         self.assertEqual([], status["active_retraining_tasks"])
         self.assertEqual("RESOLVED", status["latest_retraining_tasks"][0]["status"])
+        self.assertTrue(status["latest_retraining_tasks"][0]["currently_healthy"])
+        self.assertEqual([], status["latest_retraining_tasks"][0]["current_contract_errors"])
+        self.assertEqual([], status["latest_retraining_tasks"][0]["current_quality_blockers"])
+        self.assertTrue(status["latest_retraining_tasks"][0]["original_quality_blockers"])
+        self.assertEqual("", resolution["resolved"][0]["blocker_summary"])
+        self.assertTrue(resolution["resolved"][0]["historical_blocker_summary"])
 
     def test_retraining_failure_requeues_then_exhausts_at_bounded_attempt_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

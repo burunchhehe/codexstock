@@ -44,9 +44,19 @@
         status: engine.in_use ? "running" : "ready",
         status_label: "실행 검증 완료·온디맨드 대기",
         connected: true,
+        runtime_connected: true,
         formal_connected: true,
         adapter_ready: true,
         round_trip_verified: true,
+        success_evidence_fresh: true,
+        current_usable: true,
+        connection_truth: {
+          runtime_connected: true,
+          round_trip_verified: true,
+          proof_fresh: true,
+          current_usable: true,
+          formal_connected: true,
+        },
         connection_stage: "formal_connected",
         connection_proof_type: "verified_improvement_cycle_round_trip",
         operational_state: "normal",
@@ -65,10 +75,14 @@
     const summary = {
       ...(payload.summary || {}),
       engine_count: engines.length,
-      connected_count: engines.filter((row) => row.formal_connected).length,
+      connected_count: engines.filter((row) => row.runtime_connected ?? row.connected).length,
+      runtime_connected_count: engines.filter((row) => row.runtime_connected ?? row.connected).length,
+      adapter_connected_count: engines.filter((row) => row.runtime_connected ?? row.connected).length,
       formal_connected_count: engines.filter((row) => row.formal_connected).length,
       adapter_ready_count: engines.filter((row) => row.adapter_ready).length,
       round_trip_verified_count: engines.filter((row) => row.round_trip_verified).length,
+      fresh_round_trip_count: engines.filter((row) => row.success_evidence_fresh).length,
+      current_usable_count: engines.filter((row) => row.current_usable).length,
       error_count: engines.filter((row) => row.status === "error").length,
       warning_count: engines.filter((row) => row.status === "warning").length,
       operational_counts: {
@@ -198,7 +212,7 @@
     setText("externalEngineTotal", Number(summary.engine_count || engines.length || 0).toLocaleString());
     setText("externalEngineActive", Number(summary.in_use_count || 0).toLocaleString());
     setText("externalEngineAdapterReady", Number(summary.adapter_ready_count || 0).toLocaleString());
-    setText("externalEngineRoundTrip", Number(summary.round_trip_verified_count || 0).toLocaleString());
+    setText("externalEngineRoundTrip", Number(summary.fresh_round_trip_count || 0).toLocaleString());
     setText("externalEngineConnected", Number(summary.connected_count || 0).toLocaleString());
     setText("externalEngineErrors", Number(summary.error_count || 0).toLocaleString());
     setText("externalEnginePersistent", Number(summary.persistent_heavy_engine_count || 0).toLocaleString());
@@ -231,10 +245,12 @@
       }[engine.execution_policy] || "실행 정책 확인 대기";
       const operationalLabel = engine.operational_state_label || "확인중";
       const lastSuccess = engine.last_success_at ? formatDateTimeShort(engine.last_success_at) : "성공 기록 없음";
-      const connectionLabel = engine.formal_connected
-        ? "정식 연결"
+      const connectionLabel = engine.connected
+        ? engine.success_evidence_fresh
+          ? "연결 완료·최근 검증 정상"
+          : "연결 완료·최근 검증 지연"
         : engine.round_trip_verified
-          ? "왕복 이력 있음·현재 비정상"
+          ? "왕복 이력 있음·현재 연결 끊김"
           : engine.adapter_ready
             ? "설치·어댑터 준비·왕복 미검증"
             : "연결 준비 중";
@@ -248,6 +264,13 @@
             <span class="external-engine-status">${escapeHtml(engine.status_label || "대기")}</span>
           </div>
           <div class="external-engine-description">${escapeHtml(engine.description || "외부 검증 작업을 수행합니다.")}</div>
+          ${Array.isArray(engine.specialist_groups) && engine.specialist_groups.length ? `
+            <div class="external-engine-specialists">
+              ${engine.specialist_groups.map((group) => `
+                <div><b>${escapeHtml(group.label || "구분")}</b><strong>${escapeHtml(group.engines || "-")}</strong><span>${escapeHtml(group.purpose || "")}</span></div>
+              `).join("")}
+            </div>
+          ` : ""}
           ${engine.health_note ? `<div class="external-engine-health-note">${escapeHtml(engine.health_note)}</div>` : ""}
           <div class="external-engine-runtime-policy">
             <b>${engine.heavy_compute_policy === "on_demand_only" ? "ON-DEMAND" : "CHECK"}</b>
@@ -279,6 +302,7 @@
 
   async function load(silent = true, deps = {}) {
     const { fetchJson, addLog, el, escapeHtml, setText } = deps;
+    const sidecarPromise = loadExecutionSidecar(true, deps);
     try {
       const response = await fetchJson("/api/external-engines/status", { cache: "no-store" });
       const result = await response.json();
@@ -286,11 +310,13 @@
       const improvement = await loadImprovement(true, deps);
       const reconciled = reconcileEngineDashboardWithImprovement(result, improvement || {});
       render(reconciled, deps);
+      await sidecarPromise;
       if (!silent) {
         addLog(`외부 엔진 상태 새로고침: ${Number(reconciled.summary?.engine_count || 0)}개 · 사용 중 ${Number(reconciled.summary?.in_use_count || 0)}개`);
       }
       return reconciled;
     } catch (error) {
+      await sidecarPromise;
       const grid = el("#externalEngineGrid");
       if (grid) {
         grid.innerHTML = `
@@ -301,6 +327,125 @@
       }
       setText("externalEngineUpdatedAt", "상태 확인 실패");
       if (!silent) addLog(`외부 엔진 상태 조회 실패: ${error.message}`);
+      return null;
+    }
+  }
+
+  function percent(value, total) {
+    if (!(Number(total) > 0)) return 0;
+    return Math.max(0, Math.min(100, (Number(value || 0) / Number(total)) * 100));
+  }
+
+  function renderExecutionSidecar(payload = {}, deps = {}) {
+    const { el, setText, formatDateTimeShort } = deps;
+    const card = el("#executionSidecarCard");
+    if (!card) return;
+    const process = payload.runtime_process || {};
+    const proof = payload.validation_proof || {};
+    const pipeline = payload.candidate_pipeline || {};
+    const drill = payload.pipeline_drill || {};
+    const stages = pipeline.stage_counts || {};
+    const alive = process.process_alive === true;
+    const fresh = process.status_fresh === true;
+    const operational = payload.ok === true;
+    const pipelineHealthy = pipeline.trading_pipeline_healthy !== false;
+    const complete = proof.proof_complete === true;
+    const healthy = alive && fresh && operational && pipelineHealthy;
+    const state = healthy ? (complete ? "ready" : "running") : "error";
+    const badge = state === "ready" ? "연결됨 · 검증 완료" : state === "running" ? "연결됨 · 상시 작동" : "연결 이상";
+    const summary = healthy
+      ? "코덱스스톡의 신호를 독립적으로 감시·검증하는 실행기가 계속 작동 중입니다."
+      : "외부 실행기의 프로세스 또는 heartbeat가 정상 범위를 벗어났습니다.";
+    card.className = `execution-sidecar-card ${state}`;
+    setText("executionSidecarBadge", badge);
+    setText("executionSidecarSummary", summary);
+    const pipelineLabels = {
+      normal_watch: "정상 관망",
+      normal_risk_block: "정상 차단",
+      data_wait: "데이터 대기",
+      system_bottleneck: "시스템 병목",
+      candidate_not_promoted: "후보 승격 확인",
+      executor_processing: "실행기 처리 중",
+      connected: "종단 연결 정상",
+      pipeline_stalled: "파이프라인 정지",
+    };
+    const pipelineLabel = pipelineLabels[pipeline.state] || "상태 확인 중";
+    setText("executionSidecarBadge", healthy ? pipelineLabel : `확인 필요 · ${pipelineLabel}`);
+    setText("executionSidecarSummary", healthy ? `시스템 정상 · 매매 파이프라인 ${pipelineLabel}` : `확인 필요 · ${pipelineLabel}`);
+    setText("executionSidecarMode", String(payload.mode || "unknown").toUpperCase());
+    setText("executionSidecarProcess", alive ? `실행 중 · PID ${Number(process.process_id || 0)}` : "중지됨");
+    const age = Number(process.status_age_seconds);
+    setText("executionSidecarHeartbeat", Number.isFinite(age) ? `${Math.max(0, Math.round(age))}초 전` : "확인 불가");
+    setText("executionSidecarProcessed", `${Number(payload.processed_total || 0).toLocaleString()}건 · 대기 ${Number(payload.inbox_pending || 0).toLocaleString()}건`);
+    setText("executionSidecarOrderBoundary", payload.real_order_supported === true ? "실주문 지원" : "실주문 차단 · Shadow/Paper");
+    setText("executionPipelineCandidates", `${Number(stages.candidate_tickets || 0).toLocaleString()}건`);
+    setText("executionPipelineScanned", `${Number(stages.market_scan_items || 0).toLocaleString()}종목`);
+    setText("executionPipelineValidated", `${Number(stages.validation_complete || 0).toLocaleString()}건`);
+    setText("executionPipelineValidationPending", `${Number(stages.validation_pending || 0).toLocaleString()}건`);
+    setText("executionPipelinePassed", `${Number(stages.risk_passed || 0).toLocaleString()}건`);
+    setText("executionPipelineSignals", `${Number(stages.signed_signal_published || 0).toLocaleString()}건`);
+    setText("executionPipelineResults", `${Number(stages.matched_executor_results ?? stages.executor_results ?? 0).toLocaleString()}건`);
+    const noTradeLabels = {
+      NORMAL_WATCH: "정상 관망",
+      NORMAL_RISK_BLOCK: "위험 기준에 따른 정상 차단",
+      DATA_UNAVAILABLE: "필수 데이터 대기",
+      NORMAL_IN_PROGRESS: "정상 처리 중",
+      SYSTEM_BOTTLENECK: "시스템 병목",
+      EXECUTION_OBSERVED: "실행기 결과 확인",
+    };
+    const noTradeCode = String(pipeline.no_trade_classification || "-");
+    setText("executionPipelineNoTrade", noTradeLabels[noTradeCode] || noTradeCode.replaceAll("_", " "));
+    const evidence = pipeline.evidence_levels || {};
+    setText("executionPipelineEvidence", String(evidence.executor_handoff || "not_observed_today").replaceAll("_", " "));
+    setText(
+      "executionPipelineDrill",
+      drill.ok === true && drill.real_order_allowed === false
+        ? `통과 · ${String(drill.result_state || "SHADOW_ACCEPTED")}`
+        : (drill.error ? "실패 · 로그 확인" : "확인 대기"),
+    );
+
+    const observed = Number(proof.observation_hours || 0);
+    const requiredHours = Number(proof.required_observation_hours || 24);
+    const results = Number(proof.qualifying_result_count || 0);
+    const requiredResults = Number(proof.required_result_count || 10);
+    const symbols = Number(proof.observed_symbol_count || 0);
+    const requiredSymbols = Number(proof.required_symbol_count || 2);
+    const observationPct = percent(observed, requiredHours);
+    const resultPct = Math.min(percent(results, requiredResults), percent(symbols, requiredSymbols));
+    setText("executionSidecarObservationLabel", `${observed.toFixed(2)} / ${requiredHours}시간`);
+    setText("executionSidecarCandidateLabel", `${results} / ${requiredResults}건 · 종목 ${symbols} / ${requiredSymbols}`);
+    const observationBar = el("#executionSidecarObservationBar");
+    const candidateBar = el("#executionSidecarCandidateBar");
+    if (observationBar) {
+      observationBar.style.width = `${observationPct}%`;
+      observationBar.parentElement?.setAttribute("aria-valuenow", String(Math.round(observationPct)));
+    }
+    if (candidateBar) {
+      candidateBar.style.width = `${resultPct}%`;
+      candidateBar.parentElement?.setAttribute("aria-valuenow", String(Math.round(resultPct)));
+    }
+    setText(
+      "executionSidecarFooter",
+      `세션 ${String(payload.runtime_session_id || "-").slice(0, 8)} · ${Number(payload.cycles || 0).toLocaleString()}회 감시 · 최근 확인 ${payload.updated_at ? formatDateTimeShort(payload.updated_at) : "대기"}`,
+    );
+  }
+
+  async function loadExecutionSidecar(silent = true, deps = {}) {
+    const { fetchJson, addLog, el, setText } = deps;
+    try {
+      const response = await fetchJson("/api/execution-sidecar/status", { cache: "no-store" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "외부 실행기 상태 조회 실패");
+      renderExecutionSidecar(result, deps);
+      if (!silent) addLog(`외부 실행기 상태: ${result.ok ? "상시 작동 중" : "점검 필요"}`);
+      return result;
+    } catch (error) {
+      const card = el("#executionSidecarCard");
+      if (card) card.className = "execution-sidecar-card error";
+      setText("executionSidecarBadge", "연결 확인 실패");
+      setText("executionSidecarSummary", "외부 실행기 상태 API에 연결하지 못했습니다.");
+      setText("executionSidecarFooter", error.message);
+      if (!silent) addLog(`외부 실행기 상태 조회 실패: ${error.message}`);
       return null;
     }
   }
@@ -352,5 +497,7 @@
     reconcileEngineDashboardWithImprovement,
     loadImprovement,
     runImprovement,
+    renderExecutionSidecar,
+    loadExecutionSidecar,
   });
 }(window));

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>코덱스스톡 HTS</title>
-    <link rel="stylesheet" href="./styles.css?v=20260719-internal-developer-drag-v2" />
+    <link rel="stylesheet" href="./styles.css?v=20260719-overlay-layer-v6" />
   </head>
   <body>
     <main class="app-shell">
@@ -19,6 +19,24 @@
           <strong id="aiTrainingToggleText">연구 AI 대기</strong>
           <small id="aiTrainingToggleSub">기록학습 꺼짐</small>
         </button>
+        <section id="operatingFocusCard" class="operating-focus-card" data-mode="loading" aria-live="polite">
+          <div class="operating-focus-heading">
+            <strong>업무 집중도</strong>
+            <span id="operatingFocusLabel">상태 확인 중</span>
+          </div>
+          <div class="focus-meter-row trading">
+            <span>매매</span>
+            <div class="focus-meter"><i id="tradingFocusFill"></i></div>
+            <b id="tradingFocusPct">-</b>
+          </div>
+          <div class="focus-meter-row research">
+            <span>연구</span>
+            <div class="focus-meter"><i id="researchFocusFill"></i></div>
+            <b id="researchFocusPct">-</b>
+          </div>
+          <small id="operatingFocusTask">현재 우선 업무를 확인하고 있습니다.</small>
+          <small id="operatingFocusSchedule">개장일 07:30~15:30 매매 100%</small>
+        </section>
         <nav class="tabs">
           <button class="tab active" data-page="dashboard" id="tabDashboard"></button>
           <button class="tab" data-page="trading" id="tabTrading"></button>
@@ -55,8 +73,11 @@
             <div class="internal-developer-metrics">
               <div><b id="internalDeveloperOpenCount">-</b><small>실제 이상</small></div>
               <div><b id="internalDeveloperAdviceCount">-</b><small>GPT 자문</small></div>
+              <div><b id="internalDeveloperPaidPending">-</b><small>유료 자문 대기</small></div>
               <div><b id="internalDeveloperHeartbeat">-</b><small>최근 감시</small></div>
             </div>
+            <div class="internal-developer-progress" id="internalDeveloperProgress"></div>
+            <div class="internal-developer-paid-advisor" id="internalDeveloperPaidAdvisor"></div>
             <div class="internal-developer-latest" id="internalDeveloperLatest"></div>
             <div class="internal-developer-history" id="internalDeveloperHistory"></div>
             <footer>
@@ -1006,7 +1027,7 @@
       </section>
 
       <section class="page" id="trading">
-        <section class="panel page-role-panel">
+        <section class="panel page-role-panel trading-guide-only workspace-subview-hidden" aria-hidden="true">
           <strong>AI 감독/승인은 “사람이 보는 최종 감독석”입니다.</strong>
           <p>AI가 24시간 후보 발굴, 과거장 훈련, 모의매매, 복기를 계속 수행하고 이 화면은 그 결과를 사람이 확인하는 곳입니다. 사용자가 직접 모의투자를 즐기라는 탭이 아니라, AI가 왜 이 종목을 보려는지 차트·금액·근거로 검토하고 승인/거절/중단하는 관제석입니다.</p>
           <div class="page-role-tags">
@@ -1016,7 +1037,7 @@
             <span>실전 전 리스크 확인</span>
           </div>
         </section>
-        <section class="panel page-action-guide">
+        <section class="panel page-action-guide trading-guide-only workspace-subview-hidden" aria-hidden="true">
           <strong>이 화면에서 사용자가 하는 일</strong>
           <div class="action-guide-grid">
             <div><b>종목 고르기</b><span>왼쪽 검색창에 GST, 삼성, ㅅㅅ처럼 입력하고 관심종목에 넣습니다.</span></div>
@@ -1041,10 +1062,6 @@
             <div class="watch-table">
               <div class="row head watch-row"><span id="headSymbol2"></span><span id="headPrice2"></span><span id="headChange2"></span><span></span></div>
               <div id="watchRowsTrading"></div>
-            </div>
-            <div class="watch-recommend-panel">
-              <div class="watch-recommend-head"><strong>AI 추천종목</strong><button id="refreshRecommendations">추천 갱신</button></div>
-              <div id="recommendRows" class="watch-recommend-list"></div>
             </div>
           </aside>
           <section class="panel chart-panel">
@@ -1079,14 +1096,15 @@
               <div><small>구간 등락금액</small><strong id="chartMoneyChange">-</strong></div>
             </div>
             <canvas id="priceChart" width="1100" height="430"></canvas>
-            <div class="minute-flow-panel">
+            <div class="chart-judgment-board">
+            <div class="minute-flow-panel ai-internal-evidence workspace-subview-hidden" aria-hidden="true">
               <div class="minute-flow-head">
                 <strong>한투 분봉 흐름</strong>
                 <span id="minuteFlowState">분봉 대기</span>
               </div>
               <div id="minuteFlowRows" class="minute-flow-rows"></div>
             </div>
-            <div class="intraday-minute-radar-panel">
+            <div class="intraday-minute-radar-panel ai-internal-evidence workspace-subview-hidden" aria-hidden="true">
               <div class="minute-flow-head">
                 <strong>장중 분봉 레이더</strong>
                 <span id="intradayMinuteRadarState">여러 종목 수급 대기</span>
@@ -1097,7 +1115,7 @@
               </div>
               <div id="intradayMinuteRadarRows" class="intraday-minute-radar-rows"></div>
             </div>
-            <div class="intraday-minute-radar-panel condition-screener-panel">
+            <div class="intraday-minute-radar-panel condition-screener-panel ai-internal-evidence workspace-subview-hidden" aria-hidden="true">
               <div class="minute-flow-head">
                 <strong>조건검색기</strong>
                 <span id="conditionScreenerState">조건검색 대기</span>
@@ -1154,7 +1172,7 @@
               </div>
               <div id="liveDecisionContextRows" class="live-decision-context-rows"></div>
             </div>
-            <div class="intraday-minute-radar-panel kis-rank-radar-panel">
+            <div class="intraday-minute-radar-panel kis-rank-radar-panel ai-internal-evidence workspace-subview-hidden" aria-hidden="true">
               <div class="minute-flow-head">
                 <strong>한투 거래대금 랭킹</strong>
                 <span id="kisRankRadarState">순위 조회 대기</span>
@@ -1170,7 +1188,7 @@
               </div>
               <div id="kisRankRadarRows" class="intraday-minute-radar-rows kis-rank-radar-rows"></div>
             </div>
-            <div class="intraday-minute-radar-panel kis-fluctuation-radar-panel">
+            <div class="intraday-minute-radar-panel kis-fluctuation-radar-panel ai-internal-evidence workspace-subview-hidden" aria-hidden="true">
               <div class="minute-flow-head">
                 <strong>한투 등락률 랭킹</strong>
                 <span id="kisFluctuationRadarState">등락률 조회 대기</span>
@@ -1190,7 +1208,7 @@
               </div>
               <div id="kisFluctuationRadarRows" class="intraday-minute-radar-rows kis-fluctuation-radar-rows"></div>
             </div>
-            <div class="intraday-minute-radar-panel kis-volume-power-radar-panel">
+            <div class="intraday-minute-radar-panel kis-volume-power-radar-panel ai-internal-evidence workspace-subview-hidden" aria-hidden="true">
               <div class="minute-flow-head">
                 <strong>한투 체결강도 랭킹</strong>
                 <span id="kisVolumePowerRadarState">체결강도 조회 대기</span>
@@ -1206,7 +1224,7 @@
               </div>
               <div id="kisVolumePowerRadarRows" class="intraday-minute-radar-rows kis-volume-power-radar-rows"></div>
             </div>
-            <div class="intraday-minute-radar-panel kis-quote-balance-radar-panel">
+            <div class="intraday-minute-radar-panel kis-quote-balance-radar-panel ai-internal-evidence workspace-subview-hidden" aria-hidden="true">
               <div class="minute-flow-head">
                 <strong>한투 호가잔량 랭킹</strong>
                 <span id="kisQuoteBalanceRadarState">호가잔량 조회 대기</span>
@@ -1226,15 +1244,23 @@
               </div>
               <div id="kisQuoteBalanceRadarRows" class="intraday-minute-radar-rows kis-quote-balance-radar-rows"></div>
             </div>
+            </div>
             <div class="chart-footer"><span id="legendPrice"></span><span id="legendEquity"></span><span id="legendMa"></span></div>
           </section>
-          <aside class="panel">
+          <aside class="panel orderbook-panel ai-internal-evidence workspace-subview-hidden" aria-hidden="true">
             <div class="panel-title"><strong id="bookTitle"></strong><span id="spread">-</span></div>
             <div id="askRows" class="book asks"></div>
             <div class="mid-price" id="midPrice">0.00</div>
             <div id="bidRows" class="book bids"></div>
           </aside>
-          <section class="panel paper-panel">
+          <section class="panel recommendations-panel trading-record-only workspace-subview-hidden" aria-hidden="true">
+            <div class="watch-recommend-head">
+              <div><strong>AI 추천종목</strong><small>AI가 찾은 후보의 점수·근거·위험게이트를 비교합니다.</small></div>
+              <button id="refreshRecommendations">추천 갱신</button>
+            </div>
+            <div id="recommendRows" class="watch-recommend-list"></div>
+          </section>
+          <section class="panel paper-panel trading-record-only workspace-subview-hidden" aria-hidden="true">
             <div class="panel-title"><strong id="paperTitle"></strong><span id="paperEquity">-</span></div>
             <div class="order-help-card">
               <strong>이 영역의 목적</strong>
@@ -1477,6 +1503,29 @@
             <span>리스크 관리자</span>
           </div>
         </section>
+        <section class="panel long-term-evidence-panel" aria-labelledby="longTermEvidenceTitle">
+          <div class="long-term-evidence-head">
+            <div>
+              <small>LONG-TERM EVIDENCE</small>
+              <h2 id="longTermEvidenceTitle">시간이 쌓아야 끝나는 검증</h2>
+              <p>코드 수정이 아니라 날짜와 Paper 증거가 필요한 항목입니다. 코덱스스톡이 자동으로 누적하고 원장 무결성까지 대사합니다.</p>
+            </div>
+            <button id="refreshLongTermEvidence" type="button">지금 확인</button>
+          </div>
+          <div class="long-term-evidence-summary" aria-live="polite">
+            <div><span>완료 항목</span><b id="longTermEvidenceOverall">0/3</b></div>
+            <div><span>세 항목 평균</span><b id="longTermEvidenceAverage">0%</b></div>
+            <div><span>가장 가까운 기록일</span><b id="longTermEvidenceNextDue">조회 중</b></div>
+            <small id="longTermEvidenceUpdatedAt">증거 원장을 확인하는 중입니다.</small>
+          </div>
+          <div id="longTermEvidenceRows" class="long-term-evidence-grid">
+            <article class="long-term-evidence-card loading">
+              <strong>장기 증거 진행률 조회 중</strong>
+              <span>운영 30일, 승격 리허설 20건, 순방향 관찰 90일을 한 번에 확인합니다.</span>
+            </article>
+          </div>
+          <p class="long-term-evidence-guard">이 화면은 증거 수집 상태만 표시합니다. 실전 주문은 실행하지 않습니다.</p>
+        </section>
         <section class="panel external-engine-ops-panel">
           <div class="external-engine-ops-head">
             <div>
@@ -1490,11 +1539,57 @@
             <div><b id="externalEngineTotal">9</b><span>보유 엔진</span></div>
             <div><b id="externalEngineActive">0</b><span>현재 사용 중</span></div>
             <div><b id="externalEngineAdapterReady">0</b><span>설치·어댑터 준비</span></div>
-            <div><b id="externalEngineRoundTrip">0</b><span>왕복 성공 이력</span></div>
-            <div><b id="externalEngineConnected">0</b><span>현재 정식 연결</span></div>
+            <div><b id="externalEngineRoundTrip">0</b><span>최근 왕복 검증</span></div>
+            <div><b id="externalEngineConnected">0</b><span>연결 완료</span></div>
             <div><b id="externalEngineErrors">0</b><span>점검 필요</span></div>
             <div><b id="externalEnginePersistent">0</b><span>상시 무거운 엔진</span></div>
           </div>
+          <article id="executionSidecarCard" class="execution-sidecar-card loading" aria-live="polite">
+            <div class="execution-sidecar-head">
+              <div>
+                <small>AUTOMATED EXECUTION SIDECAR</small>
+                <h3>외부 자동매매 실행기</h3>
+                <p id="executionSidecarSummary">연결 상태와 상시 작동 여부를 확인하고 있습니다.</p>
+              </div>
+              <span id="executionSidecarBadge" class="execution-sidecar-badge">확인 중</span>
+            </div>
+            <div class="execution-sidecar-facts">
+              <div><span>운영 모드</span><b id="executionSidecarMode">-</b></div>
+              <div><span>프로세스</span><b id="executionSidecarProcess">-</b></div>
+              <div><span>최근 신호</span><b id="executionSidecarHeartbeat">-</b></div>
+              <div><span>처리 결과</span><b id="executionSidecarProcessed">-</b></div>
+              <div><span>주문 권한</span><b id="executionSidecarOrderBoundary">실주문 차단</b></div>
+              <div><span>오늘 후보</span><b id="executionPipelineCandidates">0건</b></div>
+              <div><span>시장 스캔</span><b id="executionPipelineScanned">0종목</b></div>
+              <div><span>상세검증 완료</span><b id="executionPipelineValidated">0건</b></div>
+              <div><span>상세검증 대기</span><b id="executionPipelineValidationPending">0건</b></div>
+              <div><span>위험 통과</span><b id="executionPipelinePassed">0건</b></div>
+              <div><span>서명 신호</span><b id="executionPipelineSignals">0건</b></div>
+              <div><span>실행 결과</span><b id="executionPipelineResults">0건</b></div>
+              <div><span>무매매 분류</span><b id="executionPipelineNoTrade">-</b></div>
+              <div><span>종단 증거</span><b id="executionPipelineEvidence">-</b></div>
+              <div><span>오늘 Shadow 훈련</span><b id="executionPipelineDrill">확인 대기</b></div>
+            </div>
+            <div class="execution-sidecar-progress-grid">
+              <div>
+                <div class="execution-sidecar-progress-head">
+                  <span>연속 가동 검증</span><b id="executionSidecarObservationLabel">0 / 24시간</b>
+                </div>
+                <div class="execution-sidecar-meter" role="progressbar" aria-label="외부 실행기 연속 가동 검증" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                  <span id="executionSidecarObservationBar"></span>
+                </div>
+              </div>
+              <div>
+                <div class="execution-sidecar-progress-head">
+                  <span>후보 처리 증거</span><b id="executionSidecarCandidateLabel">0 / 10건</b>
+                </div>
+                <div class="execution-sidecar-meter" role="progressbar" aria-label="외부 실행기 후보 처리 증거" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                  <span id="executionSidecarCandidateBar"></span>
+                </div>
+              </div>
+            </div>
+            <footer id="executionSidecarFooter">상태 조회 대기</footer>
+          </article>
           <div id="externalImprovementLoop" class="external-improvement-loop" aria-live="polite">
             <div class="external-improvement-head">
               <div>
@@ -1887,26 +1982,25 @@
     <section class="agent-console" id="agentConsole">
       <div class="agent-console-head" id="agentConsoleHead">
         <div>
-          <strong>AI 트레이더 명령창</strong>
-          <span id="agentConsoleState">24시간 운용 대기</span>
+          <strong>코덱스스톡 비서</strong>
+          <span id="agentConsoleState">대화·작업 보고 대기</span>
         </div>
         <div class="agent-console-actions">
-          <button id="agentPollTelegram" title="텔레그램 명령 확인">텔레그램 확인</button>
           <button id="agentConsoleMinimize" title="접기">_</button>
         </div>
       </div>
       <div class="agent-console-body" id="agentConsoleBody">
         <div class="agent-message agent">
-          나는 이 HTS를 24시간 쓰는 AI 트레이더 콘솔입니다. 예: "오늘 뭐 매매했어?", "브리핑", "백테스트 AAPL 2020-01-01 오늘", "다중비교 AAPL MSFT NVDA", "텔레그램 보고"
+          저는 코덱스스톡 비서입니다. 자유롭게 말해주세요. 버튼 작업이 끝나면 무엇이 바뀌었고 어디서 확인하는지도 여기에서 알려드립니다.
         </div>
       </div>
       <form class="agent-console-input" id="agentCommandForm">
-        <input id="agentCommandInput" autocomplete="off" placeholder="예: 오늘 뭐 매매했어?, 왜 샀어?, 브리핑" />
-        <button id="agentCommandSend" type="submit">실행</button>
+        <input id="agentCommandInput" autocomplete="off" placeholder="예: 지금 뭐 하고 있어?, 아까 작업 어디서 봐?, 오늘 브리핑해줘" />
+        <button id="agentCommandSend" type="submit">보내기</button>
       </form>
     </section>
-    <script src="./external-engine-dashboard.js?v=20260717-improvement-loop"></script>
-    <script src="./workspace-subpages.js?v=20260713-instant-menu-navigation"></script>
-    <script src="./app.js?v=20260719-internal-developer-drag-v2"></script>
+    <script src="./external-engine-dashboard.js?v=20260720-execution-sidecar-status"></script>
+    <script src="./workspace-subpages.js?v=20260719-direct-supervision-v6"></script>
+    <script src="./app.js?v=20260720-full-chart-history-v9"></script>
   </body>
 </html>

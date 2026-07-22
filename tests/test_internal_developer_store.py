@@ -78,6 +78,62 @@ class InternalDeveloperStoreTests(unittest.TestCase):
             self.assertEqual(1, recovered["unreviewed_reports"])
             self.assertFalse(reviewed["attention_required"])
 
+    def test_drill_and_quarantined_advice_do_not_degrade_operational_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+            incident = store.open_incident(
+                {
+                    "classification": "UNKNOWN",
+                    "component": "drill-simulator",
+                    "summary": "Synthetic drill only",
+                    "drill": True,
+                    "actual_failure": False,
+                }
+            )
+            store.transition_incident(incident["incident_id"], "NEEDS_EXTERNAL_ADVICE")
+            store.write_report(incident["incident_id"], {"status": "drill_waiting"})
+            store.submit_advice(
+                {
+                    "incident_id": incident["incident_id"],
+                    "summary": "Modify source code during drill",
+                }
+            )
+
+            status = store.status()
+
+            self.assertTrue(status["healthy"])
+            self.assertEqual("healthy", status["operational_status"])
+            self.assertEqual(0, status["open_incidents"])
+            self.assertEqual(1, status["drill_open_incidents"])
+            self.assertEqual(0, status["unreviewed_reports"])
+            self.assertEqual(1, status["informational_unreviewed_reports"])
+            self.assertEqual(0, status["unreviewed_advice"])
+            self.assertEqual(1, status["quarantined_advice"])
+            self.assertFalse(status["attention_required"])
+
+    def test_pipeline_incident_requires_complete_closure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+            incident = store.open_incident({
+                "classification": "EXECUTOR_HANDOFF_FAILED",
+                "component": "trading_pipeline",
+                "summary": "Executor did not return a result.",
+            })
+            store.transition_incident(incident["incident_id"], "NEEDS_EXTERNAL_ADVICE")
+            with self.assertRaisesRegex(ValueError, "closure requires verified evidence"):
+                store.transition_incident(incident["incident_id"], "CLOSED")
+            closed = store.transition_incident(
+                incident["incident_id"],
+                "CLOSED",
+                metadata={
+                    "root_cause_confirmed": True,
+                    "reproduction_checked": True,
+                    "end_to_end_verified": True,
+                    "regression_test_passed": True,
+                },
+            )
+            self.assertEqual("CLOSED", closed["state"])
+
     def test_incident_transitions_are_strict_and_attempts_are_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = self._store(directory)
@@ -110,6 +166,29 @@ class InternalDeveloperStoreTests(unittest.TestCase):
             self.assertEqual(1, len(store.list_incidents()))
             self.assertEqual(2, second["recurrence_count"])
             self.assertTrue(second["deduplicated"])
+
+    def test_deduplicated_incident_refreshes_precise_component_and_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+            first_payload = {
+                "primary_issue": "LEGACY_APPROVAL_GATE_ACTIVE",
+                "component": "unknown",
+                "summary": "approval contract mismatch",
+                "issues": [{"issue_code": "LEGACY_APPROVAL_GATE_ACTIVE"}],
+            }
+            first = store.open_incident(first_payload)
+            refined = dict(first_payload)
+            refined.update({
+                "component": "approval_mode_contract",
+                "root_cause": "A delegated ticket carried an inert legacy approval token.",
+                "next_action": "Verify ticket-signal-result parity read-only.",
+            })
+            second = store.open_incident(refined)
+
+            self.assertEqual(first["incident_id"], second["incident_id"])
+            self.assertEqual("approval_mode_contract", second["component"])
+            self.assertEqual(refined["root_cause"], second["diagnostic"]["root_cause"])
+            self.assertNotEqual("CLOSED", second["state"])
 
     def test_report_writes_latest_and_redacted_telegram_launcher_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

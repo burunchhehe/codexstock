@@ -43,11 +43,7 @@ Short version:
 https://<your-public-host>/mcp
 ```
 
-Current quick tunnel example:
-
-```text
-https://printed-viewed-geographic-cosmetic.trycloudflare.com/mcp
-```
+Do not register an expiring quick-tunnel hostname for production review. Use a stable HTTPS endpoint that you control.
 
 ## User API Connection
 

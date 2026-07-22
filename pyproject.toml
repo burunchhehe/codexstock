@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 [project.scripts]
 stock-suite = "stock_suite.cli:main"
 codexstock-research-forge = "codexstock_research_forge.cli:main"
+codexstock-execution-sidecar = "stock_suite.execution_sidecar:main"
 
 [project.optional-dependencies]
 storage = ["duckdb>=1.1,<2", "ijson>=3.3,<4", "pytz>=2024.1"]

@@ -5,6 +5,7 @@ import json
 import hashlib
 import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -181,7 +182,12 @@ def default_user_data_root() -> Path:
     local_app_data = os.getenv("LOCALAPPDATA", "").strip()
     if local_app_data:
         return Path(local_app_data) / "CodexStock" / "data"
-    return Path.home() / ".codexstock" / "data"
+    try:
+        return Path.home() / ".codexstock" / "data"
+    except RuntimeError:
+        # Service accounts and environment-sanitized tests may have no home.
+        # Keep the fallback outside the source tree instead of failing status reads.
+        return Path(tempfile.gettempdir()) / "CodexStock" / "data"
 
 
 def active_data_root(repo_root: Path) -> Path:

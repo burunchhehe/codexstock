@@ -6,6 +6,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+node_modules/
+.gradle/
+.idea/
 .env
 .env.local
 .env.*.local
@@ -29,6 +32,10 @@ third_party/
 *.tar
 *.tar.gz
 *.exe
+*.apk
+*.aab
+*.jks
+*.keystore
 *.bak
 *.backup
 *.damaged-*
@@ -72,5 +79,7 @@ obj/
 TestResults/
 artifacts/
 dist/
+mobile/**/android/local.properties
+mobile/**/android/app/build/
 *.user
 *.suo

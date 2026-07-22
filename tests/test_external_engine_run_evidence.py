@@ -14,6 +14,7 @@ from app.external_engine_runtime import (
     ResearchBundleRuntime,
     VectorbtRuntime,
     _external_run_evidence_path,
+    _external_process_error,
     _load_last_run_evidence,
     _persist_last_run_evidence,
     _run_external_process,
@@ -22,6 +23,15 @@ from app.external_engine_runtime import (
 
 
 class ExternalEngineRunEvidenceTests(unittest.TestCase):
+    def test_windows_code_integrity_failure_is_classified(self):
+        error, detail = _external_process_error(
+            "ImportError: DLL load failed: 애플리케이션 제어 정책에서 이 파일을 차단했습니다.",
+            1,
+        )
+
+        self.assertEqual("windows_code_integrity_blocked", error)
+        self.assertIn("애플리케이션 제어 정책", detail)
+
     def test_explicit_engine_root_is_independent_of_process_local_app_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

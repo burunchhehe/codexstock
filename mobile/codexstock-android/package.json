@@ -1,0 +1,18 @@
+{
+  "name": "codexstock-android",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private Android console for a PC-hosted CodexStock instance",
+  "scripts": {
+    "sync": "cap sync android",
+    "open": "cap open android",
+    "build:debug": "cap sync android && cd android && gradlew.bat assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.4.2",
+    "@capacitor/core": "8.4.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.4.2"
+  }
+}

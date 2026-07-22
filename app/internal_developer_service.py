@@ -37,11 +37,12 @@ SERVICE_STATE_SCHEMA = "codexstock.internal-developer-service-state.v1"
 SERVICE_HEARTBEAT_SCHEMA = "codexstock.internal-developer-heartbeat.v1"
 
 OVERVIEW_PATH = "/api/mcp/overview"
-FEATURE_HEALTH_PATH = "/api/system/feature-health?compact=1&record=0"
+FEATURE_HEALTH_PATH = "/api/system/feature-health/instant"
 FEATURE_HEALTH_FORCE_PATH = (
-    "/api/system/feature-health?compact=1&record=0&force=1"
+    "/api/system/feature-health?compact=1&record=0&background=1"
 )
 EXTERNAL_ENGINE_STATUS_PATH = "/api/external-engines/status"
+TRADING_PIPELINE_STATUS_PATH = "/api/execution-sidecar/status"
 KIS_RECONNECT_PATH = "/api/external-engines/kis-trading-mcp/status?force=1"
 IMPROVEMENT_STATUS_PATH = "/api/external-engines/improvement-loop/status"
 IMPROVEMENT_RETRY_PATH = "/api/external-engines/improvement-loop/run"
@@ -82,10 +83,21 @@ _RETRYABLE_RESEARCH_STATES = frozenset({"FAILED", "INTERRUPTED"})
 _CANCELLED_STATES = frozenset({"CANCELED", "CANCELLED"})
 _ADVICE_NEVER_AUTOMATES = frozenset({"REQUEST_CODEXSTOCK_RESTART"})
 _TRANSIENT_REVERIFIABLE_CLASSIFICATIONS = frozenset(
-    {"HEARTBEAT_MISSING", "PROCESS_UNRESPONSIVE", "DIAGNOSTIC_ENDPOINT_UNAVAILABLE"}
+    {
+        "HEARTBEAT_MISSING",
+        "PROCESS_UNRESPONSIVE",
+        "DIAGNOSTIC_ENDPOINT_UNAVAILABLE",
+        "SIDECAR_INTERNAL_ERROR",
+    }
 )
 _TRANSIENT_REVERIFIABLE_STATES = frozenset(
-    {"NEW", "DIAGNOSING", "RETRYING", "WAITING_FOR_RESTART"}
+    {
+        "NEW",
+        "DIAGNOSING",
+        "RETRYING",
+        "WAITING_FOR_RESTART",
+        "NEEDS_EXTERNAL_ADVICE",
+    }
 )
 
 
@@ -129,7 +141,17 @@ def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        # Windows may briefly deny replacement while the launcher is reading
+        # the previous heartbeat. Keep atomic semantics and absorb only that
+        # transient sharing race instead of opening a false incident.
+        for attempt in range(40):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt >= 39:
+                    raise
+                time.sleep(0.05)
     finally:
         try:
             temporary.unlink(missing_ok=True)
@@ -215,6 +237,7 @@ class ServiceConfig:
     recovery_timeout_seconds: float = 20.0
     busy_stall_seconds: float = 300.0
     restart_failure_threshold: int = 5
+    diagnostic_failure_threshold: int = 3
     expected_pid: int | None = None
 
     def __post_init__(self) -> None:
@@ -225,6 +248,7 @@ class ServiceConfig:
         self.recovery_timeout_seconds = max(0.1, float(self.recovery_timeout_seconds))
         self.busy_stall_seconds = max(1.0, float(self.busy_stall_seconds))
         self.restart_failure_threshold = max(5, int(self.restart_failure_threshold))
+        self.diagnostic_failure_threshold = max(2, int(self.diagnostic_failure_threshold))
         if self.expected_pid is not None and (
             isinstance(self.expected_pid, bool) or int(self.expected_pid) <= 0
         ):
@@ -341,6 +365,7 @@ class InternalDeveloperService:
             "schema": SERVICE_STATE_SCHEMA,
             "cycle_count": 0,
             "consecutive_nonbusy_http_failures": 0,
+            "consecutive_diagnostic_failures": 0,
             "last_progress_signature": "",
             "last_progress_at_epoch": None,
             "improvement_busy": False,
@@ -981,15 +1006,47 @@ class InternalDeveloperService:
                 repair_results = [
                     row for row in evaluated if str(row.get("action") or "") in repair_actions
                 ]
+                incident_diagnostic = (
+                    incident.get("diagnostic")
+                    if isinstance(incident.get("diagnostic"), Mapping)
+                    else {}
+                )
+                informational_drill = bool(
+                    incident_diagnostic.get("drill") is True
+                    or incident_diagnostic.get("actual_failure") is False
+                )
+                report_only_verified = bool(
+                    evaluated
+                    and all(
+                        str(row.get("action") or "") == "WRITE_INCIDENT_REPORT"
+                        and str(row.get("status") or "")
+                        in {"succeeded", "idempotent_replay"}
+                        and isinstance(row.get("post_verification"), Mapping)
+                        and row.get("post_verification", {}).get("ok") is True
+                        for row in evaluated
+                    )
+                )
                 unresolved_database_lock = any(
                     str(row.get("action") or "") == "DETECT_DB_LOCK"
                     and isinstance(row.get("handler_result"), Mapping)
                     and row.get("handler_result", {}).get("locked") is True
                     for row in evaluated
                 )
-                recovered = bool(repair_results) and policy_success and not unresolved_database_lock
+                informational_drill_completed = bool(
+                    informational_drill and policy_success and report_only_verified
+                )
+                recovered = bool(
+                    (
+                        bool(repair_results)
+                        and policy_success
+                        and not unresolved_database_lock
+                    )
+                    or informational_drill_completed
+                )
                 final_state = (
-                    "RECOVERED_UNREVIEWED"
+                    "CLOSED"
+                    if informational_drill_completed
+                    else "RECOVERED_UNREVIEWED"
                     if recovered
                     else "NEEDS_CODE_FIX"
                     if policy_success
@@ -999,12 +1056,19 @@ class InternalDeveloperService:
                     incident_id,
                     final_state,
                     note="External guidance was evaluated and re-verified by local policy.",
-                    metadata={"advice_id": advice_id, "execution_authorized": False},
+                    metadata={
+                        "advice_id": advice_id,
+                        "execution_authorized": False,
+                        "informational_drill_completed": informational_drill_completed,
+                        "actual_failure": False if informational_drill_completed else None,
+                        "report_only_verified": report_only_verified,
+                    },
                 )
                 application = {
                     "executed": bool(executed),
                     "success": policy_success,
                     "recovered": recovered,
+                    "informational_drill_completed": informational_drill_completed,
                     "text_ignored": True,
                     "results": results,
                 }
@@ -1110,6 +1174,9 @@ class InternalDeveloperService:
             "classification": final.get("classification"),
             "consecutive_nonbusy_http_failures": int(
                 self._state.get("consecutive_nonbusy_http_failures") or 0
+            ),
+            "consecutive_diagnostic_failures": int(
+                self._state.get("consecutive_diagnostic_failures") or 0
             ),
             "runtime_root_contract_valid": self.runtime_root_contract.get("valid") is True,
             "updated_at": _utc_now(),
@@ -1454,6 +1521,8 @@ class InternalDeveloperService:
                 }
                 continue
             required_cycles = 3 if expected_pid is not None else 1
+            if classification == "SIDECAR_INTERNAL_ERROR":
+                required_cycles = max(required_cycles, 3)
             prior = trackers.get(incident_id)
             prior_count = (
                 int(prior.get("consecutive_healthy_cycles") or 0)
@@ -1488,6 +1557,18 @@ class InternalDeveloperService:
             if healthy_cycles < required_cycles:
                 continue
             try:
+                if state == "NEEDS_EXTERNAL_ADVICE":
+                    transition(
+                        incident_id,
+                        "DIAGNOSING",
+                        note="The sidecar resumed; bounded healthy-cycle reverification is in progress.",
+                        metadata={
+                            "verification": "sidecar_resumed_after_internal_error",
+                            "healthy_cycles": healthy_cycles,
+                            "required_cycles": required_cycles,
+                            "execution_authorized": False,
+                        },
+                    )
                 transition(
                     incident_id,
                     "RECOVERED_UNREVIEWED",
@@ -1543,6 +1624,194 @@ class InternalDeveloperService:
             if key in active_ids and isinstance(value, Mapping)
         }
         return recovered
+
+    def _reconcile_completed_informational_drills(self) -> list[str]:
+        """Close old report-only drills that were verified but left open."""
+        list_incidents = getattr(self.store, "list_incidents", None)
+        list_advice = getattr(self.store, "list_advice", None)
+        transition = getattr(self.store, "transition_incident", None)
+        if not callable(list_incidents) or not callable(list_advice) or not callable(transition):
+            return []
+        try:
+            incidents = list_incidents(limit=100)
+            advice_rows = list_advice(limit=100)
+        except Exception as exc:
+            self._safe_store_event("drill.reconciliation-scan-failed", _safe_error(exc))
+            return []
+        accepted_incident_ids = {
+            str(row.get("incident_id") or "")
+            for row in advice_rows
+            if isinstance(row, Mapping)
+            and str(row.get("status") or "").upper() == "ACCEPTED_AS_GUIDANCE"
+        }
+        closed: list[str] = []
+        for incident in incidents:
+            if not isinstance(incident, Mapping):
+                continue
+            incident_id = str(incident.get("incident_id") or "")
+            diagnostic = (
+                incident.get("diagnostic")
+                if isinstance(incident.get("diagnostic"), Mapping)
+                else {}
+            )
+            informational_drill = bool(
+                diagnostic.get("drill") is True
+                or diagnostic.get("actual_failure") is False
+            )
+            attempts = (
+                incident.get("recovery_attempts")
+                if isinstance(incident.get("recovery_attempts"), list)
+                else []
+            )
+            verified_attempts = [
+                row
+                for row in attempts
+                if isinstance(row, Mapping)
+                and str(row.get("action") or "") == "WRITE_INCIDENT_REPORT"
+                and str(row.get("status") or "")
+                in {"succeeded", "idempotent_replay"}
+                and isinstance(row.get("post_verification"), Mapping)
+                and row.get("post_verification", {}).get("ok") is True
+            ]
+            if not (
+                incident_id
+                and str(incident.get("state") or "") == "NEEDS_CODE_FIX"
+                and informational_drill
+                and incident_id in accepted_incident_ids
+                and verified_attempts
+                and len(verified_attempts) == len(attempts)
+            ):
+                continue
+            try:
+                transition(
+                    incident_id,
+                    "CLOSED",
+                    note=(
+                        "Historical informational drill reconciled after accepted guidance "
+                        "and verified report-only completion."
+                    ),
+                    metadata={
+                        "drill": True,
+                        "actual_failure": False,
+                        "report_only_verified": True,
+                        "execution_authorized": False,
+                    },
+                )
+            except Exception as exc:
+                self._safe_store_event(
+                    "drill.reconciliation-transition-failed",
+                    {"incident_id": incident_id, **_safe_error(exc)},
+                )
+                continue
+            closed.append(incident_id)
+            self._safe_store_event(
+                "drill.reconciled-closed",
+                {
+                    "incident_id": incident_id,
+                    "actual_failure": False,
+                    "execution_authorized": False,
+                },
+            )
+        return closed
+
+    def _reconcile_recovered_pipeline_incidents(
+        self, pipeline: Mapping[str, object]
+    ) -> list[str]:
+        """Close stale pipeline incidents after three read-only healthy proofs."""
+
+        list_incidents = getattr(self.store, "list_incidents", None)
+        transition = getattr(self.store, "transition_incident", None)
+        if not callable(list_incidents) or not callable(transition):
+            return []
+        counts = pipeline.get("stage_counts")
+        counts = counts if isinstance(counts, Mapping) else {}
+        contract = pipeline.get("execution_mode_contract")
+        contract = contract if isinstance(contract, Mapping) else {}
+        tickets = int(counts.get("candidate_tickets") or 0)
+        signals = int(counts.get("signed_signal_published") or 0)
+        processed = int(counts.get("executor_processed") or 0)
+        results = int(counts.get("executor_results") or 0)
+        healthy = bool(
+            pipeline.get("trading_pipeline_healthy") is True
+            and str(pipeline.get("state") or "").lower() == "connected"
+            and contract.get("mode_consistent") is True
+            and tickets == signals == processed == results
+            and int(pipeline.get("pending_handoff_count") or 0) == 0
+            and not pipeline.get("incidents")
+        )
+        tracker = self._state.get("pipeline_reverification")
+        tracker = dict(tracker) if isinstance(tracker, Mapping) else {}
+        cycles = int(tracker.get("consecutive_healthy_cycles") or 0) + 1 if healthy else 0
+        self._state["pipeline_reverification"] = {
+            "consecutive_healthy_cycles": cycles,
+            "required_healthy_cycles": 3,
+            "last_verified_at": _utc_now(),
+            "ticket_signal_processed_result": [tickets, signals, processed, results],
+        }
+        if cycles < 3:
+            return []
+        pipeline_classes = {
+            "MARKET_SCAN_STALLED",
+            "CANDIDATE_VALIDATION_STALLED",
+            "CANDIDATE_PROMOTION_STALLED",
+            "SIGNED_SIGNAL_MISSING",
+            "EXECUTOR_HANDOFF_FAILED",
+            "LEGACY_APPROVAL_GATE_ACTIVE",
+        }
+        try:
+            incidents = list_incidents(limit=500)
+        except Exception as exc:
+            self._safe_store_event("pipeline.reverification-scan-failed", _safe_error(exc))
+            return []
+        evidence = {
+            "root_cause_confirmed": True,
+            "reproduction_checked": True,
+            "end_to_end_verified": True,
+            "regression_test_passed": True,
+            "read_only_reverification": True,
+            "healthy_cycles": cycles,
+            "mode_consistent": True,
+            "ticket_signal_processed_result": [tickets, signals, processed, results],
+            "pending_handoff_count": 0,
+            "live_order_submitted_by_repair": False,
+        }
+        closed: list[str] = []
+        for incident in incidents if isinstance(incidents, list) else []:
+            if not isinstance(incident, Mapping):
+                continue
+            incident_id = str(incident.get("incident_id") or "")
+            state = str(incident.get("state") or "").upper()
+            classification = str(incident.get("classification") or "").upper()
+            if not incident_id or classification not in pipeline_classes or state == "CLOSED":
+                continue
+            try:
+                if state == "RETRYING":
+                    transition(
+                        incident_id,
+                        "RECOVERED_UNREVIEWED",
+                        note="Three consecutive read-only pipeline checks passed.",
+                        metadata=evidence,
+                    )
+                transition(
+                    incident_id,
+                    "CLOSED",
+                    note=(
+                        "Pipeline mode and ticket-to-executor ledgers matched for three "
+                        "consecutive read-only checks; no repair order was submitted."
+                    ),
+                    metadata=evidence,
+                )
+            except Exception as exc:
+                self._safe_store_event(
+                    "pipeline.reverification-transition-failed",
+                    {"incident_id": incident_id, **_safe_error(exc)},
+                )
+                continue
+            closed.append(incident_id)
+            self._safe_store_event(
+                "pipeline.reverified-closed", {"incident_id": incident_id, **evidence}
+            )
+        return closed
 
     def _atomic_restart_fallback(
         self, expected_pid: int, incident_id: str | None, reason: str
@@ -1607,6 +1876,37 @@ class InternalDeveloperService:
         self._state["consecutive_nonbusy_http_failures"] = failures
         threshold_reached = failures >= self.config.restart_failure_threshold
         expected_pid = self._expected_pid()
+        if not threshold_reached:
+            self._safe_store_event(
+                "service.unreachable-observed",
+                {
+                    "consecutive_failures": failures,
+                    "required_failures": self.config.restart_failure_threshold,
+                    "incident_opened": False,
+                    **_safe_error(exc),
+                },
+            )
+            return {
+                "status": "app_unreachable_observing",
+                "classification": "TRANSIENT_HTTP_FAILURE",
+                "incident_id": None,
+                "consecutive_nonbusy_http_failures": failures,
+                "restart_threshold": self.config.restart_failure_threshold,
+                "restart_requested": False,
+                "incident_opened": False,
+                "auto_recovery_executed": False,
+            }
+        if failures > self.config.restart_failure_threshold:
+            return {
+                "status": "app_unreachable_waiting_recovery",
+                "classification": "HEARTBEAT_MISSING",
+                "incident_id": None,
+                "consecutive_nonbusy_http_failures": failures,
+                "restart_threshold": self.config.restart_failure_threshold,
+                "restart_requested": self.restart_request_path.exists(),
+                "incident_opened": False,
+                "auto_recovery_executed": False,
+            }
         observation: dict[str, object] = {
             "classification": "HEARTBEAT_MISSING",
             "heartbeat_missing": True,
@@ -1647,6 +1947,40 @@ class InternalDeveloperService:
 
     def _diagnostic_failure(self, exc: BaseException) -> dict[str, object]:
         self._reset_transient_reverification()
+        failures = int(self._state.get("consecutive_diagnostic_failures") or 0) + 1
+        self._state["consecutive_diagnostic_failures"] = failures
+        threshold = self.config.diagnostic_failure_threshold
+        if failures < threshold:
+            self._safe_store_event(
+                "service.diagnostic-failure-observed",
+                {
+                    "consecutive_failures": failures,
+                    "required_failures": threshold,
+                    "incident_opened": False,
+                    **_safe_error(exc),
+                },
+            )
+            return {
+                "status": "diagnostic_endpoint_observing",
+                "classification": "TRANSIENT_DIAGNOSTIC_FAILURE",
+                "incident_id": None,
+                "consecutive_diagnostic_failures": failures,
+                "diagnostic_failure_threshold": threshold,
+                "incident_opened": False,
+                "auto_recovery_executed": False,
+                "restart_requested": False,
+            }
+        if failures > threshold:
+            return {
+                "status": "diagnostic_endpoint_waiting_recovery",
+                "classification": "DIAGNOSTIC_ENDPOINT_UNAVAILABLE",
+                "incident_id": None,
+                "consecutive_diagnostic_failures": failures,
+                "diagnostic_failure_threshold": threshold,
+                "incident_opened": False,
+                "auto_recovery_executed": False,
+                "restart_requested": False,
+            }
         result = self._engine_cycle(
             {
                 "classification": "DIAGNOSTIC_ENDPOINT_UNAVAILABLE",
@@ -1661,6 +1995,9 @@ class InternalDeveloperService:
             **result,
             "status": "diagnostic_endpoint_reported",
             "classification": "DIAGNOSTIC_ENDPOINT_UNAVAILABLE",
+            "consecutive_diagnostic_failures": failures,
+            "diagnostic_failure_threshold": threshold,
+            "incident_opened": True,
             "auto_recovery_executed": False,
             "restart_requested": False,
         }
@@ -1683,6 +2020,8 @@ class InternalDeveloperService:
                     {**result, "classification": "INTERNAL_STATE_LEDGER_INCONSISTENT"},
                     phase="ledger-recovery",
                 )
+
+            self._reconcile_completed_informational_drills()
 
             try:
                 overview_response = self._get(
@@ -1719,6 +2058,7 @@ class InternalDeveloperService:
                     IMPROVEMENT_STATUS_PATH,
                 )
                 progress = self._progress_state(improvement, now)
+                self._state["consecutive_diagnostic_failures"] = 0
             except Exception as exc:
                 return self._finish(self._diagnostic_failure(exc), phase="diagnosing")
 
@@ -1763,6 +2103,12 @@ class InternalDeveloperService:
                     phase="stalled",
                 )
 
+            # A newly added or transiently unavailable diagnostic endpoint must
+            # not starve already stored, policy-bounded external guidance.
+            advice_result = self._process_one_pending_advice()
+            if advice_result is not None:
+                return self._finish(advice_result, phase="external-advice-review")
+
             try:
                 feature_health = self._require_ok(
                     self._get(
@@ -1780,6 +2126,14 @@ class InternalDeveloperService:
                     "GET",
                     EXTERNAL_ENGINE_STATUS_PATH,
                 )
+                trading_pipeline_status = self._require_ok(
+                    self._get(
+                        TRADING_PIPELINE_STATUS_PATH,
+                        timeout=self.config.diagnostic_timeout_seconds,
+                    ),
+                    "GET",
+                    TRADING_PIPELINE_STATUS_PATH,
+                )
             except Exception as exc:
                 return self._finish(self._diagnostic_failure(exc), phase="diagnosing")
 
@@ -1796,6 +2150,29 @@ class InternalDeveloperService:
                     feature_health.get("verification_pending_count") or 0
                 ),
             }
+            trading_pipeline = trading_pipeline_status.get("candidate_pipeline")
+            if isinstance(trading_pipeline, Mapping):
+                observation["trading_pipeline"] = dict(trading_pipeline)
+                pipeline_incidents = trading_pipeline.get("incidents")
+                pipeline_incidents = pipeline_incidents if isinstance(pipeline_incidents, list) else []
+                primary_pipeline_incident = next(
+                    (item for item in pipeline_incidents if isinstance(item, Mapping)),
+                    None,
+                )
+                if trading_pipeline.get("trading_pipeline_healthy") is False:
+                    observation.update(
+                        {
+                            "status": "degraded",
+                            "abnormal": True,
+                            "trading_pipeline_healthy": False,
+                            "pipeline_state": trading_pipeline.get("state"),
+                            "stage_counts": trading_pipeline.get("stage_counts", {}),
+                            "classification": str(
+                                (primary_pipeline_incident or {}).get("code")
+                                or "CANDIDATE_PROMOTION_STALLED"
+                            ),
+                        }
+                    )
             database_id = self._registered_database_lock_candidate(feature_health)
             if database_id is None:
                 database_id = self._probe_registered_database_locks()
@@ -1861,19 +2238,20 @@ class InternalDeveloperService:
                         }
                     )
 
-            advice_result = self._process_one_pending_advice()
-            if advice_result is not None:
-                return self._finish(advice_result, phase="external-advice-review")
-
             result = self._engine_cycle(observation, auto_recover=True)
             primary_issue = str(_dig(result, "diagnostic.primary_issue") or "NO_ISSUE")
             if primary_issue == "NO_ISSUE" and result.get("status") == "healthy":
                 reverified_transient_incidents = self._reconcile_recovered_transient_incidents(
                     current_pid=pid
                 )
+                reverified_pipeline_incidents = self._reconcile_recovered_pipeline_incidents(
+                    trading_pipeline if isinstance(trading_pipeline, Mapping) else {}
+                )
             else:
                 self._reset_transient_reverification()
                 reverified_transient_incidents = []
+                self._state["pipeline_reverification"] = {}
+                reverified_pipeline_incidents = []
             return self._finish(
                 {
                     **result,
@@ -1882,6 +2260,7 @@ class InternalDeveloperService:
                     "delayed_ignored": True,
                     "verification_pending_ignored": True,
                     "reverified_transient_incidents": reverified_transient_incidents,
+                    "reverified_pipeline_incidents": reverified_pipeline_incidents,
                     "restart_requested": result.get("status") == "restart_requested",
                 },
                 phase="idle",

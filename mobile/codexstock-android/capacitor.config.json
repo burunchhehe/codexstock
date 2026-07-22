@@ -1,0 +1,13 @@
+{
+  "appId": "kr.codexstock.mobile",
+  "appName": "코덱스스톡",
+  "webDir": "../../app/web/mobile",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  }
+}

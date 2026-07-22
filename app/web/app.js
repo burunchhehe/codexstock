@@ -299,6 +299,8 @@ const state = {
     dragStartEnd: 0,
     hoverX: null,
   },
+  fullHistoryLoaded: new Set(),
+  fullHistoryLoading: new Map(),
   strategyChart: {
     results: [],
     start: 0,
@@ -469,7 +471,6 @@ const BUTTON_HELP = {
   copyFriendSharePack: "친구에게 보낼 소개, 사용법, API 안내, 배포 점검 결과 묶음을 클립보드에 복사합니다.",
   downloadFriendSharePack: "친구에게 보낼 소개, 사용법, API 안내, 배포 점검 결과를 하나의 Markdown 파일로 저장합니다.",
   smallAccountRefresh: "소액 계좌 성장 플랜과 현재 작업을 다시 점검합니다.",
-  agentPollTelegram: "텔레그램 명령을 즉시 한 번 확인합니다.",
   agentCommandSend: "명령창에 입력한 지시를 AI 트레이더에게 보냅니다.",
 };
 
@@ -543,6 +544,23 @@ const PAGE_ACTION_GUIDE = {
 let buttonHelpBound = false;
 let buttonHintTimer = null;
 let buttonActionSeq = 0;
+const AGENT_SECRETARY_STORAGE_KEY = "codexstock-agent-secretary-conversation-v1";
+const appConnectionIncident = {
+  active: false,
+  startedAt: 0,
+  failureCount: 0,
+  latestDetail: "",
+  rowId: "",
+  probeTimer: null,
+};
+const agentSecretaryConversation = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(AGENT_SECRETARY_STORAGE_KEY) || "[]");
+    return Array.isArray(saved) ? saved.slice(-12) : [];
+  } catch (_) {
+    return [];
+  }
+})();
 
 function buttonLabel(button) {
   return String(button?.textContent || button?.getAttribute("aria-label") || button?.id || "버튼").replace(/\s+/g, " ").trim();
@@ -605,11 +623,32 @@ function updateLastActionBoard(button, stateName = "idle", label = "대기") {
   if (!node || !button) return;
   const time = new Date().toLocaleTimeString("ko-KR", { hour12: false });
   const help = ensureButtonHelp(button);
+  const statusLabel = stateName === "running"
+    ? "실행 중"
+    : stateName === "pending"
+      ? "확인 중"
+      : ["success", "done"].includes(stateName)
+        ? "완료 · 로그 확인"
+        : stateName === "fail"
+          ? "실패 · 로그 확인"
+          : label;
+  const progressLabel = stateName === "running"
+    ? "작업을 시작했습니다."
+    : stateName === "pending"
+      ? "처리는 계속되고 있으며 완료 응답을 기다립니다."
+      : ["success", "done"].includes(stateName)
+        ? "처리가 완료됐습니다."
+        : stateName === "fail"
+          ? "처리가 중단됐습니다. 로그를 확인하세요."
+          : "실행할 기능을 선택하세요.";
   node.className = `workspace-last-action ${stateName || "idle"}`;
   node.innerHTML = `
     <strong>최근 실행</strong>
-    <span><b>${productHtml(buttonLabel(button))}</b> · ${productHtml(label)} · ${escapeHtml(time)}</span>
+    <span><b>${productHtml(buttonLabel(button))}</b> · ${productHtml(statusLabel)} · ${escapeHtml(time)}</span>
     <small>${productHtml(help)}</small>
+    <div class="workspace-last-action-progress" role="progressbar" aria-label="${escapeHtml(buttonLabel(button))} 진행 상태">
+      <i></i><em>${productHtml(progressLabel)}</em>
+    </div>
   `;
 }
 
@@ -633,6 +672,11 @@ function clearButtonRunState(button, delay = 4200) {
 
 const INSTANT_NAVIGATION_SELECTOR = [
   "[data-instant-navigation]",
+  "[data-main-chart-window]",
+  "#priceChartZoomIn",
+  "#priceChartZoomOut",
+  "#priceChartPanLeft",
+  "#priceChartPanRight",
   ".tab",
   "[data-page-jump]",
   "[data-guide-button]",
@@ -655,7 +699,7 @@ function clearInstantNavigationRunState(root = document) {
 }
 
 function startButtonRunState(button) {
-  if (!button || button.disabled || isInstantNavigationButton(button) || button.closest(".tabs") || button.dataset.guideButton || button.id === "agentConsoleMinimize") return;
+  if (!button || button.disabled || isInstantNavigationButton(button) || button.closest(".tabs") || button.closest("#agentConsole") || button.dataset.guideButton) return;
   const seq = ++buttonActionSeq;
   button.dataset.actionSeq = String(seq);
   button.dataset.actionStartedAt = String(Date.now());
@@ -667,10 +711,25 @@ function startButtonRunState(button) {
   }, 1200);
   window.setTimeout(() => {
     if (button.dataset.actionSeq === String(seq) && ["running", "pending"].includes(button.dataset.runState || "")) {
-      markButtonRunState(button, "done", "로그 확인");
-      clearButtonRunState(button);
+      markButtonRunState(button, "pending", "처리중");
+      notifyAgentSecretaryButtonResult(
+        button,
+        "pending",
+        `${buttonLabel(button)} 작업이 계속 진행 중입니다. 완료 신호가 오면 여기에서 다시 알려드리겠습니다.`,
+      );
     }
   }, 6200);
+  window.setTimeout(() => {
+    if (button.dataset.actionSeq === String(seq) && ["running", "pending"].includes(button.dataset.runState || "")) {
+      markButtonRunState(button, "fail", "응답 지연");
+      notifyAgentSecretaryButtonResult(
+        button,
+        "delayed",
+        `${buttonLabel(button)} 작업의 완료 응답이 60초 안에 오지 않았습니다. 기능이 실패했다고 단정하지 않고 이벤트 로그와 내부 개발자 상태를 확인해주세요.`,
+      );
+      clearButtonRunState(button, 10000);
+    }
+  }, 60000);
 }
 
 const BUTTON_RUN_GENERIC_TOKENS = new Set([
@@ -725,24 +784,149 @@ function isBackgroundButtonRunLog(text) {
 
 function resolveLatestButtonRunState(message) {
   const button = document.querySelector(`button[data-action-seq="${buttonActionSeq}"]`);
-  if (!button) return;
+  if (!button) return null;
   const startedAt = Number(button.dataset.actionStartedAt || 0);
   const elapsed = Date.now() - startedAt;
-  if (!startedAt || elapsed > 18000) return;
+  if (!startedAt || elapsed > 300000) return null;
   const text = String(message || "");
   const related = buttonRunMessageRelated(button, text);
   const background = isBackgroundButtonRunLog(text);
   if (/실패|오류|에러|차단|불가|거절|중단|failed|error/i.test(text)) {
-    if (!related && (background || elapsed > 3500)) return;
+    if (!related && (background || elapsed > 3500)) return null;
     markButtonRunState(button, "fail", "실패");
     clearButtonRunState(button, 6200);
-    return;
+    return { button, state: "fail", message: text };
   }
-  if (/완료|성공|저장|갱신|조회|등록|생성|전송|적용|확인|시작|정지|큐|통과/i.test(text)) {
-    if (!related && (background || elapsed > 3500)) return;
+  if (/완료|성공|정상|저장|갱신|조회|등록|생성|전송|적용|확인|시작|정지|읽었|큐|통과/i.test(text)) {
+    if (!related && (background || elapsed > 3500)) return null;
     markButtonRunState(button, "success", "완료");
     clearButtonRunState(button);
+    return { button, state: "success", message: text };
   }
+  return null;
+}
+
+function agentSecretaryButtonLocation(button) {
+  const page = button?.closest(".page");
+  const guide = pageGuide[page?.id] || pageGuide.dashboard;
+  return `${guide.title} 화면`;
+}
+
+function rememberAgentSecretaryMessage(role, message) {
+  const text = String(message || "").trim();
+  if (!text) return;
+  agentSecretaryConversation.push({ role, text, createdAt: new Date().toISOString() });
+  if (agentSecretaryConversation.length > 12) agentSecretaryConversation.splice(0, agentSecretaryConversation.length - 12);
+  try {
+    localStorage.setItem(AGENT_SECRETARY_STORAGE_KEY, JSON.stringify(agentSecretaryConversation));
+  } catch (_) {
+    // The conversation still works for this session when browser storage is unavailable.
+  }
+}
+
+function notifyAgentSecretaryButtonResult(button, stateName, detail) {
+  if (!button || isInstantNavigationButton(button)) return;
+  const seq = String(button.dataset.actionSeq || "0");
+  const noticeKey = `${seq}:${stateName}`;
+  if (button.dataset.secretaryNoticeKey === noticeKey) return;
+  button.dataset.secretaryNoticeKey = noticeKey;
+  const label = buttonLabel(button);
+  const location = agentSecretaryButtonLocation(button);
+  const help = ensureButtonHelp(button);
+  let message;
+  if (stateName === "success") {
+    message = `비서 보고 · ${label} 완료\n결과: ${detail}\n확인 위치: ${location}의 해당 결과 카드\n활용: ${help}`;
+  } else if (stateName === "fail") {
+    message = `비서 보고 · ${label} 실패\n원인 단서: ${detail}\n확인 위치: ${location}과 내부 개발자 기능 이상 창\n다음: 같은 버튼을 반복해서 누르지 말고 원인 보고를 먼저 확인해주세요.`;
+  } else if (stateName === "delayed") {
+    message = `비서 보고 · ${label} 응답 지연\n상태: ${detail}\n확인 위치: ${location}과 이벤트 로그`;
+  } else {
+    message = `비서 보고 · ${label} 처리 중\n상태: ${detail}\n확인 위치: ${location}`;
+  }
+  appendAgentMessage("agent", message);
+  rememberAgentSecretaryMessage("비서", message);
+  setText("agentConsoleState", stateName === "success" ? "비서 완료 보고" : stateName === "fail" ? "비서 오류 보고" : "비서 진행 보고");
+}
+
+function isAppConnectionFailure(message) {
+  return /failed to fetch|networkerror|load failed|err_connection|connection refused/i.test(String(message || ""));
+}
+
+function renderAppConnectionIncident(recovered = false) {
+  const log = el("#eventLog");
+  if (!log) return;
+  let row = appConnectionIncident.rowId ? document.getElementById(appConnectionIncident.rowId) : null;
+  if (!row) {
+    row = document.createElement("div");
+    appConnectionIncident.rowId = `appConnectionIncident-${Date.now()}`;
+    row.id = appConnectionIncident.rowId;
+    row.className = "event";
+    log.prepend(row);
+  }
+  const time = new Date().toLocaleTimeString();
+  const count = Math.max(1, Number(appConnectionIncident.failureCount || 0));
+  const message = recovered
+    ? `본체 연결 복구 완료 · 같은 단절로 묶은 자동 조회 ${count}건이 다음 주기부터 정상 재개됩니다.`
+    : `본체 연결 일시 중단 · 자동 조회 실패 ${count}건을 동일 사건 1건으로 묶었습니다. 재시작 또는 연결 복구를 확인 중입니다.`;
+  row.innerHTML = `<strong>${time}</strong> ${productHtml(message)}`;
+}
+
+function completeAppConnectionRecovery() {
+  if (!appConnectionIncident.active) return;
+  appConnectionIncident.active = false;
+  renderAppConnectionIncident(true);
+  const message = `비서 보고 · 코덱스스톡 본체 연결이 복구됐습니다. 같은 단절에서 발생한 자동 조회 실패 ${appConnectionIncident.failureCount}건은 개별 고장이 아니며 다음 조회 주기부터 다시 실행됩니다.`;
+  appendAgentMessage("agent", message);
+  rememberAgentSecretaryMessage("비서", message);
+  setText("agentConsoleState", "본체 연결 복구 완료");
+  appConnectionIncident.probeTimer = null;
+}
+
+function scheduleAppConnectionRecoveryProbe() {
+  if (appConnectionIncident.probeTimer) return;
+  const probe = async () => {
+    appConnectionIncident.probeTimer = null;
+    if (!appConnectionIncident.active) return;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 2_000);
+    try {
+      const response = await fetch("/api/system/feature-health/instant", {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (response.ok) {
+        completeAppConnectionRecovery();
+        return;
+      }
+    } catch (_) {
+      // Keep one incident open while the same server outage continues.
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+    appConnectionIncident.probeTimer = window.setTimeout(probe, 2_000);
+  };
+  appConnectionIncident.probeTimer = window.setTimeout(probe, 1_000);
+}
+
+function recordAppConnectionFailure(message) {
+  const firstFailure = !appConnectionIncident.active;
+  if (firstFailure) {
+    appConnectionIncident.active = true;
+    appConnectionIncident.startedAt = Date.now();
+    appConnectionIncident.failureCount = 0;
+    appConnectionIncident.latestDetail = "";
+    appConnectionIncident.rowId = "";
+  }
+  appConnectionIncident.failureCount += 1;
+  appConnectionIncident.latestDetail = String(message || "");
+  renderAppConnectionIncident(false);
+  if (firstFailure) {
+    const notice = "비서 보고 · 코덱스스톡 본체 연결이 잠시 끊겼습니다. 여러 자동 조회 실패를 하나의 연결 사건으로 묶고 자동 재연결을 확인하고 있습니다.";
+    appendAgentMessage("agent", notice);
+    rememberAgentSecretaryMessage("비서", notice);
+    setText("agentConsoleState", "본체 재연결 확인 중");
+  }
+  scheduleAppConnectionRecoveryProbe();
 }
 
 function setupButtonHelp() {
@@ -1702,6 +1886,7 @@ function switchPage(pageId) {
   renderPageActionGuide(pageId);
   window.CodexStockSubpages?.activate(pageId);
   if (pageId === "recommendations") hydrateRecommendationPage(false);
+  if (pageId === "settings") loadLongTermEvidenceProgress(true).catch(() => {});
   if (pageId === "capitalChallenge") {
     loadCapitalChallenge(false);
     loadHundredBillionLabStatus();
@@ -1812,9 +1997,17 @@ async function tickMarket(fast = false) {
         market: quote.market || meta.market,
       });
     });
-    state.history.set(state.active, result.history || []);
-    state.historyDates.set(state.active, Array.isArray(result.history_dates) && result.history_dates.length ? result.history_dates : makeFallbackDates((result.history || []).length));
-    state.historySource.set(state.active, result.history_source || result.source || "데이터");
+    const incomingHistory = Array.isArray(result.history) ? result.history : [];
+    const incomingDates = Array.isArray(result.history_dates) && result.history_dates.length
+      ? result.history_dates
+      : makeFallbackDates(incomingHistory.length);
+    if (state.fullHistoryLoaded.has(state.active)) {
+      mergePriceHistory(state.active, incomingHistory, incomingDates, result.history_source || result.source || "live update");
+    } else {
+      state.history.set(state.active, incomingHistory);
+      state.historyDates.set(state.active, incomingDates);
+      state.historySource.set(state.active, result.history_source || result.source || "데이터");
+    }
     state.minuteRows.set(state.active, Array.isArray(result.minute_rows) ? result.minute_rows : []);
     state.minuteSource.set(state.active, result.minute_source || "");
     state.minuteMomentum.set(state.active, Number(result.minute_momentum_pct || 0));
@@ -2596,6 +2789,76 @@ async function loadCodexstockMaturity(silent = true) {
   }
 }
 
+function renderLongTermEvidenceProgress(payload) {
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  setText("longTermEvidenceOverall", `${Number(payload?.ready_count || 0)}/${Number(payload?.total_count || 3)}`);
+  setText("longTermEvidenceAverage", `${Number(payload?.average_progress_pct || 0).toFixed(1)}%`);
+  setText("longTermEvidenceNextDue", payload?.next_due_date || "모두 완료");
+  setText(
+    "longTermEvidenceUpdatedAt",
+    payload?.generated_at
+      ? `최근 확인 ${formatDateTimeShort(payload.generated_at)}${payload?.cache?.hit ? " · 캐시" : " · 원장 대사"}`
+      : "증거 원장 조회 대기",
+  );
+  const node = el("#longTermEvidenceRows");
+  if (!node) return;
+  if (!rows.length) {
+    node.innerHTML = `
+      <article class="long-term-evidence-card review">
+        <strong>장기 증거 항목을 불러오지 못했습니다.</strong>
+        <span>${escapeHtml(payload?.message || "잠시 뒤 지금 확인을 눌러주세요.")}</span>
+      </article>
+    `;
+    return;
+  }
+  node.innerHTML = rows.map((row) => {
+    const value = Number(row.progress_pct || 0);
+    const progress = Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+    const integrity = String(row.integrity || "검증 대기");
+    const statusClass = row.ready ? "ready" : integrity.includes("필요") ? "review" : "accruing";
+    return `
+      <article class="long-term-evidence-card ${statusClass}">
+        <div class="long-term-evidence-card-head">
+          <strong>${escapeHtml(row.label || "장기 증거")}</strong>
+          <em>${escapeHtml(row.status || "자동 누적 중")}</em>
+        </div>
+        <p>${escapeHtml(row.description || "")}</p>
+        <div class="long-term-evidence-card-progress">
+          <b>${Number(row.current || 0)}/${Number(row.target || 0)}${escapeHtml(row.unit || "")}</b>
+          <span>${progress.toFixed(1)}%</span>
+        </div>
+        <div class="long-term-evidence-track" role="progressbar" aria-label="${escapeHtml(row.label || "장기 증거")}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress.toFixed(1)}">
+          <i style="width:${progress.toFixed(1)}%"></i>
+        </div>
+        <small>${escapeHtml(row.detail || "")}</small>
+        <div class="long-term-evidence-card-foot">
+          <span>${escapeHtml(integrity)}</span>
+          <small>${escapeHtml(row.next_due_date || "-")} · ${escapeHtml(row.next_due_label || "자동 기록")}</small>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+async function loadLongTermEvidenceProgress(silent = true) {
+  try {
+    const response = await fetch(`/api/system/long-term-evidence-progress${silent ? "" : "?force=1"}`);
+    const result = await response.json();
+    if (!response.ok || result.ok === false) throw new Error(result.error || result.message || "장기 증거 조회 실패");
+    renderLongTermEvidenceProgress(result);
+    if (!silent) addLog(`장기 증거 확인: 완료 ${Number(result.ready_count || 0)}/${Number(result.total_count || 3)} · 평균 ${Number(result.average_progress_pct || 0).toFixed(1)}%`);
+    return result;
+  } catch (error) {
+    setText("longTermEvidenceUpdatedAt", `조회 실패 · ${error.message}`);
+    const node = el("#longTermEvidenceRows");
+    if (node) {
+      node.innerHTML = `<article class="long-term-evidence-card review"><strong>증거 원장 조회 실패</strong><span>${escapeHtml(error.message)}</span></article>`;
+    }
+    if (!silent) addLog(`장기 증거 조회 실패: ${error.message}`);
+    return null;
+  }
+}
+
 function relaxConditionScreener() {
   const preset = el("#conditionPreset");
   if (preset) preset.value = "custom";
@@ -2645,8 +2908,79 @@ function syncPriceChartWindowOnDataChange(symbol = state.active) {
   view.total = total;
 }
 
-function setPriceChartWindow(size) {
-  const prices = state.history.get(state.active) || [];
+function mergePriceHistory(symbol, incomingPrices, incomingDates, incomingSource = "") {
+  const prices = state.history.get(symbol) || [];
+  const dates = state.historyDates.get(symbol) || makeFallbackDates(prices.length);
+  const byDate = new Map();
+  dates.forEach((dateKey, index) => {
+    const price = Number(prices[index] || 0);
+    if (dateKey && price > 0) byDate.set(String(dateKey).slice(0, 10), price);
+  });
+  incomingDates.forEach((dateKey, index) => {
+    const price = Number(incomingPrices[index] || 0);
+    if (dateKey && price > 0) byDate.set(String(dateKey).slice(0, 10), price);
+  });
+  const mergedDates = [...byDate.keys()].sort();
+  state.historyDates.set(symbol, mergedDates);
+  state.history.set(symbol, mergedDates.map((dateKey) => byDate.get(dateKey)));
+  const priorSource = state.historySource.get(symbol) || "";
+  state.historySource.set(symbol, priorSource || incomingSource || "데이터");
+}
+
+async function ensureFullPriceChartHistory(symbol = state.active) {
+  if (state.fullHistoryLoaded.has(symbol)) return true;
+  if (state.fullHistoryLoading.has(symbol)) return state.fullHistoryLoading.get(symbol);
+  const task = (async () => {
+    const currentDates = state.historyDates.get(symbol) || [];
+    const currentBars = (state.history.get(symbol) || []).length;
+    const currentStart = String(currentDates[0] || "").slice(0, 10);
+    setText("priceChartViewport", "상장 이후 장기 일봉을 불러오는 중...");
+    const params = new URLSearchParams({
+      symbol,
+      _ts: String(Date.now()),
+    });
+    const response = await fetch(`/api/market/history?${params.toString()}`, { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "장기 차트 조회 실패");
+    const prices = Array.isArray(result.history) ? result.history : [];
+    const dates = Array.isArray(result.history_dates) ? result.history_dates : [];
+    if (prices.length < 30 || prices.length !== dates.length) throw new Error("장기 차트 데이터 형식이 올바르지 않습니다.");
+    const incomingStart = String(result.actual_start_date || dates[0] || "").slice(0, 10);
+    const incomingEnd = String(result.actual_end_date || dates[dates.length - 1] || "").slice(0, 10);
+    if (currentBars >= 300 && prices.length <= currentBars && currentStart && incomingStart >= currentStart) {
+      throw new Error(`전체 이력이 확장되지 않았습니다. 현재 ${currentBars}봉 / 응답 ${prices.length}봉`);
+    }
+    state.history.set(symbol, prices.map((value) => Number(value || 0)));
+    state.historyDates.set(symbol, dates.map((value) => String(value).slice(0, 10)));
+    state.historySource.set(
+      symbol,
+      `${result.history_source || result.provider || "장기 실데이터"} · 전체 ${result.bars || prices.length}봉 · ${incomingStart}~${incomingEnd}`,
+    );
+    state.fullHistoryLoaded.add(symbol);
+    state.priceChart.symbol = "";
+    syncPriceChartWindowOnDataChange(symbol);
+    return true;
+  })();
+  state.fullHistoryLoading.set(symbol, task);
+  try {
+    return await task;
+  } catch (error) {
+    addLog(`전체 차트 조회 실패: ${error.message}`);
+    setText("priceChartViewport", `장기 이력 조회 실패 · 현재 ${state.history.get(symbol)?.length || 0}봉만 표시`);
+    return false;
+  } finally {
+    state.fullHistoryLoading.delete(symbol);
+  }
+}
+
+async function setPriceChartWindow(size) {
+  const symbol = state.active;
+  if (size === "all") {
+    const loaded = await ensureFullPriceChartHistory(symbol);
+    if (!loaded) return;
+  }
+  if (symbol !== state.active) return;
+  const prices = state.history.get(symbol) || [];
   const total = prices.length;
   if (!total) return;
   const view = state.priceChart;
@@ -2909,7 +3243,7 @@ function bindMainPriceChartControls() {
   const canvas = el("#priceChart");
   if (!canvas) return;
   document.querySelectorAll("[data-main-chart-window]").forEach((button) => {
-    button.addEventListener("click", () => setPriceChartWindow(button.dataset.mainChartWindow));
+    button.addEventListener("click", () => void setPriceChartWindow(button.dataset.mainChartWindow));
   });
   el("#priceChartZoomIn")?.addEventListener("click", () => zoomPriceChart(-1));
   el("#priceChartZoomOut")?.addEventListener("click", () => zoomPriceChart(1));
@@ -3942,6 +4276,11 @@ function internalDeveloperStatusLabel(value) {
     RECEIVED: "수신",
     ACCEPTED_AS_GUIDANCE: "안전 자문 반영",
     QUARANTINED: "안전 격리",
+    AWAITING_USER_APPROVAL: "대표 승인 대기",
+    APPROVED: "승인 완료",
+    ADVICE_QUARANTINED: "자문 격리 검증",
+    FAILED: "자문 호출 실패",
+    STANDBY: "안전 대기",
   };
   return labels[String(value || "")] || String(value || "기록");
 }
@@ -3953,27 +4292,74 @@ function renderInternalDeveloperStatus(result = {}) {
   const heartbeat = result.heartbeat || {};
   const latestAdvice = result.latest_advice || null;
   const currentIncident = result.current_incident || null;
+  const latestRecovery = result.latest_recovery || null;
+  const workflow = result.workflow || {};
+  const paidAdvisor = result.paid_advisor || {};
   const history = Array.isArray(result.history) ? result.history : [];
   dock.dataset.tone = result.tone || "offline";
   setText("internalDeveloperLabel", result.label || "상태 확인 필요");
   setText("internalDeveloperSummary", result.status === "INCIDENT"
     ? "내부 개발자가 이상을 감지했습니다"
+    : result.status === "OBSERVING"
+      ? "일시 이상인지 다음 주기에 다시 확인합니다"
     : result.status === "RECOVERED"
-      ? "자문·재검증 기록이 정상 저장됐습니다"
+      ? "복구와 재검증 기록이 정상 저장됐습니다"
       : "내부 개발자가 계속 감시하고 있습니다");
   setText("internalDeveloperPanelTitle", result.label || "상태 확인 필요");
   setText("internalDeveloperMessage", result.message || "내부 개발자 상태를 확인할 수 없습니다.");
   setText("internalDeveloperOpenCount", `${Number(counts.real_open_incidents || 0)}건`);
   setText("internalDeveloperAdviceCount", `${Number(counts.advice || 0)}건`);
+  setText("internalDeveloperPaidPending", `${Number(paidAdvisor.awaiting_approval_count || 0)}건`);
   setText("internalDeveloperHeartbeat", internalDeveloperAgeLabel(heartbeat.age_seconds));
   setText("internalDeveloperUpdatedAt", result.generated_at
     ? `최근 확인 ${new Date(result.generated_at).toLocaleTimeString()}`
     : "조회 시각 없음");
 
+  const progressNode = el("#internalDeveloperProgress");
+  if (progressNode) {
+    const progress = Math.max(0, Math.min(100, Number(workflow.progress_percent || 0)));
+    const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
+    progressNode.innerHTML = `
+      <div class="internal-developer-progress-head">
+        <strong>${escapeHtml(workflow.label || "상태 확인")}</strong>
+        <span>${escapeHtml(`${Number(workflow.active_step || 0)}/${Number(workflow.total_steps || 5)} · ${progress}%`)}</span>
+      </div>
+      <div class="internal-developer-progress-track"><i style="width:${progress}%"></i></div>
+      <small>${escapeHtml(workflow.detail || "내부 개발자의 최근 작업 단계를 확인하고 있습니다.")}</small>
+      <div class="internal-developer-progress-steps">${steps.map((step) => `
+        <span class="${escapeHtml(step.status || "pending")}" title="${escapeHtml(step.label || "")}">${Number(step.number || 0)}</span>
+      `).join("")}</div>
+    `;
+  }
+
+  const paidAdvisorNode = el("#internalDeveloperPaidAdvisor");
+  if (paidAdvisorNode) {
+    const latestPaid = Array.isArray(paidAdvisor.latest) ? paidAdvisor.latest[0] : null;
+    const waiting = Number(paidAdvisor.awaiting_approval_count || 0);
+    const used = Number(paidAdvisor.daily_used_budget_krw || 0);
+    const dailyLimit = Number(paidAdvisor.max_daily_budget_krw || 0);
+    const requested = Number(latestPaid?.requested_budget_krw || 0);
+    const status = latestPaid?.status || (waiting ? "AWAITING_USER_APPROVAL" : "STANDBY");
+    paidAdvisorNode.dataset.state = waiting ? "waiting" : status === "FAILED" ? "failed" : "safe";
+    paidAdvisorNode.innerHTML = `
+      <div>
+        <strong>3단계 GPT 기술지원 · ${escapeHtml(internalDeveloperStatusLabel(status))}</strong>
+        <span>${waiting
+          ? `대표 승인 전에는 호출하지 않습니다 · 요청 한도 ${requested.toLocaleString()}원`
+          : latestPaid
+            ? `최근 요청 ${escapeHtml(latestPaid.request_id || "-")} · 결과는 격리 후 재검증합니다`
+            : "자체복구와 수동 자문이 실패한 경우에만 대표 승인을 요청합니다"}</span>
+      </div>
+      <small>오늘 ${used.toLocaleString()}원 / ${dailyLimit.toLocaleString()}원 · 코드수정·실주문 자동권한 없음</small>
+    `;
+  }
+
   const latestNode = el("#internalDeveloperLatest");
   if (latestNode) {
     latestNode.innerHTML = currentIncident
-      ? `<article><strong>현재 이상 · ${escapeHtml(internalDeveloperStatusLabel(currentIncident.state))}</strong><span>${escapeHtml(currentIncident.summary || currentIncident.id || "확인 필요")}</span></article>`
+      ? `<article><strong>현재 이상 · ${escapeHtml(internalDeveloperStatusLabel(currentIncident.state))}</strong><span>${escapeHtml(currentIncident.reason || currentIncident.summary || currentIncident.id || "확인 필요")}</span></article>`
+      : latestRecovery
+        ? `<article><strong>최근 복구 · 연속 정상 검증 완료</strong><span>${escapeHtml(latestRecovery.id || "-")} · ${escapeHtml(latestRecovery.summary || "장애가 해소되어 정상 감시로 복귀했습니다.")}</span></article>`
       : latestAdvice
         ? `<article><strong>최근 GPT 자문 · ${escapeHtml(internalDeveloperStatusLabel(latestAdvice.status))}</strong><span>${escapeHtml(latestAdvice.id || "-")} · ${escapeHtml(latestAdvice.summary || "자문 결과가 원장에 저장됐습니다.")}</span></article>`
         : `<article><strong>현재 실제 장애 없음</strong><span>새 장애가 생기면 이 자리에 원인과 상태가 표시됩니다.</span></article>`;
@@ -7850,6 +8236,7 @@ function renderFeatureHealthCard(health = {}) {
     ...(Array.isArray(health.failing_buttons) ? health.failing_buttons : []),
     ...(Array.isArray(health.attention_buttons) ? health.attention_buttons : (Array.isArray(health.watch_buttons) ? health.watch_buttons : [])),
     ...(Array.isArray(health.warning_buttons) ? health.warning_buttons : []),
+    ...(Array.isArray(health.domain_attention_buttons) ? health.domain_attention_buttons : []),
   ];
   const rows = (issueRows.length ? issueRows : checks).slice(0, 6);
   const normalCount = Number(health.normal_count ?? health.alive_count ?? health.ok_count ?? 0);
@@ -7858,7 +8245,11 @@ function renderFeatureHealthCard(health = {}) {
     health.verification_pending_count ?? health.visible_warning_count ?? health.attention_count ?? health.watch_count ?? 0,
   );
   const brokenCount = Number(health.operational_broken_count ?? health.broken_count ?? health.fail_count ?? 0);
+  const domainAttentionCount = Number(health.domain_attention_count ?? 0);
   const surfaceCoverage = health.surface_coverage || {};
+  const runtimeSmoke = health.surface_runtime_smoke || surfaceCoverage.surface_runtime_smoke || {};
+  const runtimeSmokeSummary = runtimeSmoke.summary || {};
+  const runtimeEvidence = health.runtime_execution_evidence || surfaceCoverage.runtime_execution_evidence || {};
   const engineHealth = health.external_engine_health || {};
   node.className = `feature-health-card ${tone}`;
   node.querySelector(".feature-health-grid").innerHTML = `
@@ -7866,6 +8257,7 @@ function renderFeatureHealthCard(health = {}) {
     <div><b class="flat">${delayedCount.toLocaleString()}</b><small>지연</small></div>
     <div><b class="flat">${verificationPendingCount.toLocaleString()}</b><small>검증대기</small></div>
     <div><b class="down">${brokenCount.toLocaleString()}</b><small>고장</small></div>
+    <div><b class="flat">${domainAttentionCount.toLocaleString()}</b><small>투자주의</small></div>
     <div><b class="${tone}">${Number(health.score || 0).toFixed(1)}</b><small>점수</small></div>
   `;
   const head = node.querySelector(".feature-health-head span");
@@ -7876,6 +8268,15 @@ function renderFeatureHealthCard(health = {}) {
     const apiCoverage = surfaceCoverage.ui_api_calls || {};
     const mcpCoverage = surfaceCoverage.mcp_tools || {};
     const coverageBits = [];
+    if (Number(runtimeEvidence.monitored_check_count || 0)) {
+      coverageBits.push(`최근 실행 증거 ${Number(runtimeEvidence.recent_success_count || 0)}/${Number(runtimeEvidence.monitored_check_count || 0)}`);
+    }
+    if (Number(runtimeSmokeSummary.api_total_count || 0)) {
+      coverageBits.push(`API 실제응답 ${Number(runtimeSmokeSummary.api_passed_count || 0)}/${Number(runtimeSmokeSummary.api_total_count || 0)}`);
+    }
+    if (Number(runtimeSmokeSummary.mcp_total_count || 0)) {
+      coverageBits.push(`MCP 실제응답 ${Number(runtimeSmokeSummary.mcp_passed_count || 0)}/${Number(runtimeSmokeSummary.mcp_total_count || 0)}`);
+    }
     if (Number(buttonCoverage.total_count || 0)) {
       coverageBits.push(`버튼 ${Number(buttonCoverage.covered_count || 0)}/${Number(buttonCoverage.total_count || 0)}`);
     }
@@ -7890,17 +8291,20 @@ function renderFeatureHealthCard(health = {}) {
     }
     const coverage = coverageBits.length ? ` · ${coverageBits.join(" · ")}` : "";
     head.textContent = total
-      ? `전체 ${total}개 · 정상 ${normalCount} · 지연 ${delayedCount} · 검증대기 ${verificationPendingCount} · 고장 ${brokenCount}${coverage}${cached}`
+      ? `전체 ${total}개 · 정상 ${normalCount} · 지연 ${delayedCount} · 검증대기 ${verificationPendingCount} · 고장 ${brokenCount} · 투자주의 ${domainAttentionCount}${coverage}${cached}`
       : "버튼/API가 실제로 살아있는지 읽기전용으로 확인합니다.";
   }
   if (rowsNode) {
     rowsNode.innerHTML = rows.length
       ? rows.map((row) => {
         const operationalState = row.operational_state || (row.status === "fail" ? "broken" : row.status === "ok" ? "normal" : "verification_pending");
-        const rowTone = operationalState === "broken" ? "down" : operationalState === "normal" ? "up" : "flat";
+        const rowTone = operationalState === "broken" ? "down" : row.domain_attention ? "flat" : operationalState === "normal" ? "up" : "flat";
         const action = row.next_action || row.detail || "점검 완료";
         const button = row.button_id ? ` · 버튼 ${row.button_id}` : "";
-        const state = row.operational_state_label || row.state_label || String(row.status || "-").toUpperCase();
+        const operationalLabel = row.operational_state_label || row.state_label || String(row.status || "-").toUpperCase();
+        const state = row.domain_attention
+          ? `${operationalLabel} · ${row.domain_attention_label || "투자주의"}`
+          : operationalLabel;
         const replayWorker = row.regeneration_worker || {};
         const replayEstimate = row.regeneration_estimate || {};
         const replayWorkerHealth = replayWorker.health_label || replayWorker.health_state || "";
@@ -7937,7 +8341,7 @@ async function refreshFeatureHealth(force = true) {
       throw new Error(health.error || "기능 자동감지 실패");
     }
     renderFeatureHealthCard(health);
-    addLog(`기능 자동감지: 고장 ${Number(health.broken_count ?? health.fail_count ?? 0)}개, 정리필요 ${Number(health.attention_count ?? health.watch_count ?? 0)}개`);
+    addLog(`기능 자동감지: 고장 ${Number(health.broken_count ?? health.fail_count ?? 0)}개, 정리필요 ${Number(health.attention_count ?? health.watch_count ?? 0)}개, 투자주의 ${Number(health.domain_attention_count ?? 0)}개`);
     return health;
   } catch (error) {
     const node = el("#featureHealthRows");
@@ -10155,6 +10559,36 @@ async function loadMarketClock() {
   } catch (error) {
     setText("marketClockFocus", "시장 시계 조회 실패");
     addLog(`시장 시계 조회 실패: ${error.message}`);
+  }
+}
+
+function renderOperatingFocus(focus = {}) {
+  const card = el("#operatingFocusCard");
+  if (!card) return;
+  const trading = Math.max(0, Math.min(100, Number(focus.trading_focus_pct || 0)));
+  const research = Math.max(0, Math.min(100, Number(focus.research_focus_pct || 0)));
+  const marketMode = Boolean(focus.market_priority_active);
+  card.dataset.mode = marketMode ? "market" : "research";
+  setText("operatingFocusLabel", focus.label || "상태 확인 필요");
+  setText("tradingFocusPct", `${Math.round(trading)}%`);
+  setText("researchFocusPct", `${Math.round(research)}%`);
+  setText("operatingFocusTask", focus.current_task || focus.reason || "현재 우선 업무를 확인하고 있습니다.");
+  setText("operatingFocusSchedule", focus.schedule_label || "개장일 07:30~15:30 매매 100%");
+  const tradingFill = el("#tradingFocusFill");
+  const researchFill = el("#researchFocusFill");
+  if (tradingFill) tradingFill.style.width = `${trading}%`;
+  if (researchFill) researchFill.style.width = `${research}%`;
+  card.title = `${focus.reason || ""}${focus.heavy_research_allowed ? "" : " · 무거운 연구 보류"}`;
+}
+
+async function loadOperatingFocus() {
+  try {
+    const response = await fetch("/api/system/operating-focus");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderOperatingFocus(await response.json());
+  } catch (error) {
+    renderOperatingFocus({ label: "상태 확인 필요", current_task: "집중도 조회 실패", trading_focus_pct: 0, research_focus_pct: 0 });
+    addLog(`업무 집중도 조회 실패: ${error.message}`);
   }
 }
 
@@ -13361,11 +13795,90 @@ async function compareLogic() {
 
 function addLog(message) {
   const now = new Date().toLocaleTimeString();
-  resolveLatestButtonRunState(message);
+  const buttonResult = resolveLatestButtonRunState(message);
+  if (buttonResult) {
+    notifyAgentSecretaryButtonResult(buttonResult.button, buttonResult.state, buttonResult.message);
+  }
+  if (isAppConnectionFailure(message)) {
+    recordAppConnectionFailure(message);
+    return;
+  }
   el("#eventLog").insertAdjacentHTML("afterbegin", `<div class="event"><strong>${now}</strong> ${productHtml(message)}</div>`);
 }
 
 let agentCommandPending = false;
+
+const AGENT_COMMAND_RECONNECT_WINDOW_MS = 45_000;
+const AGENT_COMMAND_ACTION_PATTERN = /(매수|매도|주문|체결|위임|자동매매|실행|시작|정지|켜|꺼|종료|재부팅|전원|저장|삭제|복기|훈련|백테스트|스캔)/i;
+
+function agentCommandCanRetry(command) {
+  return !AGENT_COMMAND_ACTION_PATTERN.test(String(command || ""));
+}
+
+function sleepAgentConsole(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function agentConsoleServerIsReady() {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 2_000);
+  try {
+    const response = await fetch("/api/system/feature-health/instant", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    return response.ok;
+  } catch (_) {
+    return false;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function waitForAgentConsoleServer(timeoutMs = AGENT_COMMAND_RECONNECT_WINDOW_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await agentConsoleServerIsReady()) return true;
+    await sleepAgentConsole(1_500);
+  }
+  return false;
+}
+
+function agentSecretaryConversationContext() {
+  return agentSecretaryConversation
+    .slice(-8)
+    .map((item) => `${item.role}: ${item.text}`)
+    .join("\n")
+    .slice(-4000);
+}
+
+async function fetchAgentCommand(text, signal, conversationContext = "") {
+  const response = await fetch("/api/agent/command", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      command: text,
+      source: "web-console",
+      conversation_context: conversationContext,
+    }),
+    signal,
+  });
+  const raw = await response.text();
+  let result = {};
+  try {
+    result = raw ? JSON.parse(raw) : {};
+  } catch (_) {
+    const error = new Error(`서버 응답 형식 오류 (HTTP ${response.status})`);
+    error.retryable = [502, 503, 504].includes(response.status);
+    throw error;
+  }
+  if (!response.ok) {
+    const error = new Error(result.error || result.reply || `HTTP ${response.status}`);
+    error.retryable = [502, 503, 504].includes(response.status);
+    throw error;
+  }
+  return result;
+}
 
 function appendAgentMessage(role, text) {
   const body = el("#agentConsoleBody");
@@ -13378,7 +13891,7 @@ function appendAgentMessage(role, text) {
   return node;
 }
 
-async function sendAgentCommand(command) {
+async function sendAgentCommandLegacy(command) {
   const text = String(command || "").trim();
   if (!text || agentCommandPending) return;
   agentCommandPending = true;
@@ -13392,7 +13905,7 @@ async function sendAgentCommand(command) {
     sendButton.textContent = "생성 중";
   }
   if (input) input.disabled = true;
-  setText("agentConsoleState", "AI 답변 생성 중 · 보통 5~20초");
+  setText("agentConsoleState", "비서 답변 중 · 보통 1~3초, 심층 분석은 더 걸릴 수 있음");
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 60_000);
   const startedAt = performance.now();
@@ -13419,6 +13932,69 @@ async function sendAgentCommand(command) {
     const message = error?.name === "AbortError"
       ? "답변 생성이 60초를 넘겨 중단됐습니다. 다시 실행해주세요."
       : `명령 처리 실패: ${error.message}`;
+    if (pendingMessage) pendingMessage.textContent = message;
+    else appendAgentMessage("agent", message);
+    setText("agentConsoleState", "오류");
+  } finally {
+    window.clearTimeout(timeoutId);
+    agentCommandPending = false;
+    if (sendButton) {
+      sendButton.disabled = false;
+      sendButton.textContent = originalButtonText;
+    }
+    if (input) {
+      input.disabled = false;
+      input.focus();
+    }
+  }
+}
+
+async function sendAgentCommand(command) {
+  const text = String(command || "").trim();
+  if (!text || agentCommandPending) return;
+  agentCommandPending = true;
+  const conversationContext = agentSecretaryConversationContext();
+  rememberAgentSecretaryMessage("사용자", text);
+  appendAgentMessage("user", text);
+  const pendingMessage = appendAgentMessage("agent", "답변을 준비하고 있습니다. 잠시만 기다려주세요.");
+  const sendButton = el("#agentCommandSend");
+  const input = el("#agentCommandInput");
+  const originalButtonText = sendButton?.textContent || "실행";
+  if (sendButton) {
+    sendButton.disabled = true;
+    sendButton.textContent = "생성 중";
+  }
+  if (input) input.disabled = true;
+  setText("agentConsoleState", "비서 답변 중 · 보통 1~3초, 심층 분석은 더 걸릴 수 있음");
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 90_000);
+  const startedAt = performance.now();
+  try {
+    let result;
+    try {
+      result = await fetchAgentCommand(text, controller.signal, conversationContext);
+    } catch (firstError) {
+      const retryableNetworkError = firstError instanceof TypeError || firstError?.retryable === true;
+      if (!retryableNetworkError || !agentCommandCanRetry(text) || controller.signal.aborted) throw firstError;
+      if (pendingMessage) pendingMessage.textContent = "서버 연결이 잠시 끊겼습니다. 재연결한 뒤 대화를 한 번만 다시 요청합니다.";
+      setText("agentConsoleState", "서버 재연결 중");
+      const recovered = await waitForAgentConsoleServer();
+      if (!recovered || controller.signal.aborted) {
+        throw new Error("코덱스스톡 서버가 아직 다시 연결되지 않았습니다. 잠시 후 다시 눌러주세요.");
+      }
+      result = await fetchAgentCommand(text, controller.signal, conversationContext);
+    }
+    if (pendingMessage) pendingMessage.textContent = result.reply || "응답 내용이 비어 있습니다.";
+    rememberAgentSecretaryMessage("비서", result.reply || "응답 내용이 비어 있습니다.");
+    const elapsedSeconds = Math.max(0.1, (performance.now() - startedAt) / 1000).toFixed(1);
+    setText("agentConsoleState", result.ok ? `명령 완료 · ${elapsedSeconds}초` : "답변 확인 필요");
+    addLog(`AI 명령: ${text}`);
+  } catch (error) {
+    const message = error?.name === "AbortError"
+      ? "응답 생성 또는 서버 재연결이 90초를 넘겨 중단됐습니다. 다시 실행해주세요."
+      : error instanceof TypeError
+        ? "코덱스스톡 서버와 연결이 끊겼습니다. 앱이 실행 중인지 확인해주세요."
+        : `명령 처리 실패: ${error.message}`;
     if (pendingMessage) pendingMessage.textContent = message;
     else appendAgentMessage("agent", message);
     setText("agentConsoleState", "오류");
@@ -13556,11 +14132,6 @@ async function loadTelegramPollerStatus() {
     const response = await fetch("/api/telegram/poller");
     const status = await response.json();
     const running = Boolean(status.running && status.thread_alive);
-    const label = running
-      ? "텔레그램 자동감시 켜짐"
-      : status.ready
-        ? "텔레그램 자동감시 꺼짐"
-        : "텔레그램 설정 확인 필요";
     const diagnostic = status.last_command_diagnostic || {};
     const diagnosticLabel = diagnostic.has_command
       ? ` · 최근 "${diagnostic.command || "-"}" ${diagnostic.sent_ok ? "전송완료" : "전송확인필요"}${diagnostic.retry_used ? " · 재시도" : ""}`
@@ -13571,41 +14142,8 @@ async function loadTelegramPollerStatus() {
         ? "텔레그램 자동감시 꺼짐"
         : "텔레그램 설정 확인 필요";
     if (!agentCommandPending) setText("agentConsoleState", displayLabel);
-    const button = el("#agentPollTelegram");
-    if (button) {
-      button.textContent = "수동 확인";
-      button.title = [
-        displayLabel,
-        status.last_error || status.reason || "",
-        diagnostic.has_command ? `마지막 답변: ${diagnostic.reply_preview || "-"}` : "",
-        diagnostic.has_command ? `전송: ${diagnostic.sent_ok ? "성공" : "확인 필요"} / 시도 ${diagnostic.attempt_count || 0}회 / ${diagnostic.dispatch_message || "-"}` : "",
-      ].filter(Boolean).join("\n");
-    }
   } catch (error) {
     if (!agentCommandPending) setText("agentConsoleState", "텔레그램 감시 상태 확인 실패");
-  }
-}
-
-async function pollTelegramCommands() {
-  setText("agentConsoleState", "텔레그램 수동 확인 중");
-  try {
-    const response = await fetch("/api/telegram/poll", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ timeout: 0 }),
-    });
-    const result = await response.json();
-    const handled = result.handled || [];
-    if (!handled.length) {
-      appendAgentMessage("agent", `텔레그램 새 명령 없음 (${result.message || "확인 완료"})`);
-    } else {
-      handled.forEach((item) => appendAgentMessage("agent", `텔레그램 명령 처리: ${item.command}\n${item.result?.reply || ""}`));
-    }
-    setText("agentConsoleState", `텔레그램 ${handled.length}건 처리`);
-    await loadTelegramPollerStatus();
-  } catch (error) {
-    appendAgentMessage("agent", `텔레그램 확인 실패: ${error.message}`);
-    setText("agentConsoleState", "텔레그램 오류");
   }
 }
 
@@ -13652,7 +14190,6 @@ function bindAgentConsole() {
   el("#agentConsoleMinimize").addEventListener("click", () => {
     panel.classList.toggle("minimized");
   });
-  el("#agentPollTelegram").addEventListener("click", pollTelegramCommands);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const command = input.value;
@@ -13751,6 +14288,7 @@ function bindEvents() {
   el("#livePerformanceToday")?.addEventListener("click", () => setLivePerformanceDateFilter(todayIso()));
   el("#livePerformanceAll")?.addEventListener("click", () => setLivePerformanceDateFilter(""));
   el("#refreshMaturityScore")?.addEventListener("click", () => loadCodexstockMaturity(false));
+  el("#refreshLongTermEvidence")?.addEventListener("click", () => loadLongTermEvidenceProgress(false));
   el("#runConditionScreener")?.addEventListener("click", () => loadConditionScreener(false));
   el("#relaxConditionScreener")?.addEventListener("click", relaxConditionScreener);
   el("#refreshConditionScreenerHistory")?.addEventListener("click", () => loadConditionScreenerHistory(false));
@@ -14264,6 +14802,7 @@ async function boot() {
   loadExternalKnowledge(true).catch((error) => addLog(`외부학습 조회 실패: ${error.message}`));
   loadExternalEngineDashboard(true).catch((error) => addLog(`외부 엔진 상태 조회 실패: ${error.message}`));
   loadInternalDeveloperStatus(true).catch((error) => addLog(`내부 개발자 상태 조회 실패: ${error.message}`));
+  loadLongTermEvidenceProgress(true).catch((error) => addLog(`장기 증거 진행률 조회 실패: ${error.message}`));
   loadLiveAccountChanges(true).catch((error) => addLog(`실계좌 변화 감지 실패: ${error.message}`));
   loadIntradayMinuteRadar(true).catch((error) => addLog(`분봉 레이더 조회 실패: ${error.message}`));
   loadKisRankRadar(true).catch((error) => addLog(`한투 거래대금 랭킹 조회 실패: ${error.message}`));
@@ -14294,6 +14833,7 @@ async function boot() {
   await loadMarketRegime();
   await loadMission();
   await loadMarketClock();
+  await loadOperatingFocus();
   await loadWorklog();
   await loadPipeline();
   await loadAlerts();
@@ -14324,6 +14864,7 @@ async function boot() {
   setInterval(() => loadExternalKnowledge(true), 120000);
   setInterval(() => loadExternalEngineDashboard(true), 5000);
   setInterval(() => loadInternalDeveloperStatus(true), 15000);
+  setInterval(() => loadLongTermEvidenceProgress(true), 300000);
   setInterval(() => { if (!isKoreaMarketPriorityWindow()) loadFriendReleaseReadiness(); }, 120000);
   setInterval(loadAutopilot, 30000);
   setInterval(loadHealthSnapshots, 30000);
@@ -14334,6 +14875,7 @@ async function boot() {
   setInterval(() => { if (!isKoreaMarketPriorityWindow()) loadPromotionRehearsalMemory(); }, 30000);
   setInterval(loadMission, 30000);
   setInterval(loadMarketClock, 30000);
+  setInterval(loadOperatingFocus, 30000);
   setInterval(loadWorklog, 30000);
   setInterval(loadTradeJournalSummary, 60000);
   setInterval(() => loadDaytradeActionCards(false), 300000);

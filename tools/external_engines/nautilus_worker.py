@@ -152,15 +152,23 @@ class ExecutionStressStrategy(Strategy):
     def on_quote_tick(self, quote: QuoteTick) -> None:
         self.quote_count += 1
         if self.order is None:
-            target = quote.ask_price if self.price_mode == "cross_ask" else quote.bid_price
-            self.order = self.order_factory.limit(
-                instrument_id=self.instrument_id,
-                order_side=OrderSide.BUY,
-                price=target,
-                quantity=Quantity.from_int(self.order_quantity),
-                time_in_force=TimeInForce.GTC,
-                post_only=False,
-            )
+            if self.price_mode == "market":
+                self.order = self.order_factory.market(
+                    instrument_id=self.instrument_id,
+                    order_side=OrderSide.BUY,
+                    quantity=Quantity.from_int(self.order_quantity),
+                    time_in_force=TimeInForce.IOC,
+                )
+            else:
+                target = quote.ask_price if self.price_mode == "cross_ask" else quote.bid_price
+                self.order = self.order_factory.limit(
+                    instrument_id=self.instrument_id,
+                    order_side=OrderSide.BUY,
+                    price=target,
+                    quantity=Quantity.from_int(self.order_quantity),
+                    time_in_force=TimeInForce.GTC,
+                    post_only=False,
+                )
             self.submitted_at_ns = int(quote.ts_event)
             self.submit_order(self.order)
             return
@@ -434,7 +442,7 @@ def _run_execution_stress(request: dict[str, Any], started: float) -> dict[str, 
                 cancel_latency_nanos=0,
             ),
             order_quantity=3,
-            price_mode="cross_ask",
+            price_mode="market",
             cancel_after_quotes=None,
             expected_behavior="latency",
         ),

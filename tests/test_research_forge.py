@@ -36,11 +36,128 @@ from codexstock_research_forge.realtime import ORDERBOOK_COLUMNS, ORDERBOOK_TR_I
 from codexstock_research_forge.corporate_actions import CorporateActionRegistry, OfficialCorporateActionEvidenceProvider, adjust_split_history
 from codexstock_research_forge.regimes import analyze_market_regimes
 from codexstock_research_forge.attribution import analyze_benchmark_attribution
-from codexstock_research_forge.readiness import _verified_performance, active_realtime_progress, qualified_full_session_runs
+from codexstock_research_forge.readiness import _complete_corporate_action_evidence, _complete_universe_evidence, _verified_performance, active_realtime_progress, qualified_full_session_runs
 from codexstock_research_forge.hts_csv import import_csv as import_hts_csv, template as hts_csv_template
+from codexstock_research_forge.instrument_contracts import (
+    contract_manifest,
+    normalize_instrument_dataset_contract,
+    validate_instrument_snapshot,
+)
+from codexstock_research_forge.shards import ResearchShardCoordinator
+from codexstock_research_forge.stability import EngineStabilityLedger
 
 
 class ResearchForgeTests(unittest.TestCase):
+    def test_engine_stability_ledger_hash_chain_and_regression_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = EngineStabilityLedger(Path(directory) / "stability.jsonl")
+            dashboard = {"generated_at": "2026-07-22T09:00:00+09:00", "engines": [{"engine_id": "vectorbt", "connected": True, "runtime_connected": True, "formal_connected": True, "adapter_ready": True, "current_usable": True, "operational_state": "normal", "root_cause_code": "none", "engine_commit": "abc", "runtime_mode": "on_demand", "live_order_allowed": False}]}
+            self.assertTrue(ledger.record_dashboard(dashboard, 1)["recorded"])
+            changed = json.loads(json.dumps(dashboard)); changed["generated_at"] = "2026-07-22T09:05:00+09:00"; changed["engines"][0]["engine_commit"] = "def"
+            self.assertTrue(ledger.record_dashboard(changed, 1)["recorded"])
+            audit = ledger.audit()
+            self.assertEqual(audit["status"], "regression_detected")
+            self.assertEqual(audit["regression_engine_ids"], ["vectorbt"])
+            self.assertTrue(audit["audit_hash"].startswith("sha256:"))
+            self.assertFalse(audit["live_order_allowed"])
+
+    def test_engine_stability_does_not_claim_long_term_proof_from_two_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = EngineStabilityLedger(Path(directory) / "stability.jsonl")
+            engine = {"engine_id": "openbb", "connected": True, "runtime_connected": True, "formal_connected": True, "adapter_ready": True, "current_usable": True, "operational_state": "normal", "root_cause_code": "none", "engine_commit": "abc", "runtime_mode": "on_demand", "live_order_allowed": False}
+            ledger.record_dashboard({"generated_at": "2026-07-22T09:00:00+09:00", "engines": [engine]}, 1)
+            ledger.record_dashboard({"generated_at": "2026-07-22T09:05:00+09:00", "engines": [{**engine, "operational_state": "delayed"}]}, 1)
+            audit = ledger.audit(window_days=30)
+            self.assertEqual(audit["status"], "collecting_evidence")
+            self.assertFalse(audit["enough_history"])
+            self.assertGreater(audit["required_span_seconds"], audit["observed_span_seconds"])
+    def test_distributed_shards_claim_exactly_once_and_hash_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = ResearchShardCoordinator(Path(directory))
+            created = coordinator.create_batch("walk_forward", [{"symbol": "005930"}, {"symbol": "000660"}])
+            batch_id = created["manifest"]["batch_id"]
+            first = coordinator.claim(batch_id, "worker-a", 30)
+            self.assertTrue(first["claimed"])
+            shard = first["shard"]
+            coordinator.heartbeat(batch_id, shard["shard_id"], shard["worker_token"])
+            completed = coordinator.finish(batch_id, shard["shard_id"], shard["worker_token"], result={"return_pct": 1.2})
+            self.assertEqual(completed["shard"]["status"], "SUCCEEDED")
+            second = coordinator.claim(batch_id, "worker-b", 30)
+            self.assertTrue(second["claimed"])
+            coordinator.finish(batch_id, second["shard"]["shard_id"], second["shard"]["worker_token"], error="transient", retryable=True)
+            reclaimed = coordinator.claim(batch_id, "worker-c", 30)
+            self.assertEqual(reclaimed["shard"]["shard_id"], second["shard"]["shard_id"])
+            coordinator.finish(batch_id, reclaimed["shard"]["shard_id"], reclaimed["shard"]["worker_token"], result={"return_pct": 2.3})
+            status = coordinator.status(batch_id)
+            self.assertEqual(status["status_counts"], {"SUCCEEDED": 2})
+            self.assertEqual(status["progress_percent"], 100.0)
+            self.assertFalse(status["live_order_allowed"])
+    def test_multi_market_instrument_contract_rejects_unit_and_currency_mixups(self) -> None:
+        manifest_payload = contract_manifest()
+        self.assertEqual(manifest_payload["contract_count"], 4)
+        valid = validate_instrument_snapshot({"contract_id": "US_EQUITY", "symbol": "NVDA", "market": "US", "asset_class": "EQUITY", "currency": "USD", "quote_unit": "USD_PER_SHARE", "price": "202.81", "quantity": 2, "timestamp": "2026-07-22T10:00:00-04:00", "source": "fixture", "provider": "openbb"})
+        self.assertTrue(valid["passed"])
+        mixed = validate_instrument_snapshot({"contract_id": "KR_EQUITY", "symbol": "005930", "market": "KR", "asset_class": "EQUITY", "currency": "USD", "quote_unit": "USD_PER_SHARE", "price": 100, "quantity": 0.5, "timestamp": "2026-07-22T10:00:00", "source": "fixture"})
+        self.assertFalse(mixed["passed"])
+        self.assertIn("currency_contract_mismatch", mixed["errors"])
+        self.assertIn("quote_unit_contract_mismatch", mixed["errors"])
+        self.assertIn("fractional_quantity_not_allowed", mixed["errors"])
+        self.assertIn("timestamp_timezone_missing", mixed["errors"])
+
+    def test_experiment_enforces_instrument_contract_through_paper_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            forge = ResearchForge.local(Path(directory))
+            record = forge.create_experiment(
+                StrategyDefinition(
+                    "contract-enforced",
+                    "1",
+                    {"type": "ma_cross", "symbol": "005930", "fast": 3, "slow": 8},
+                ),
+                {"dataset_id": "kr-fixture", "provider": "kis-readonly"},
+                {"execution_mode": "REALISTIC"},
+            )
+
+            self.assertEqual("KR_EQUITY", record.data_snapshot["instrument_contract_id"])
+            self.assertEqual("KRW", record.data_snapshot["currency"])
+            self.assertEqual("KRW_PER_SHARE", record.data_snapshot["quote_unit"])
+            self.assertTrue(record.data_snapshot["instrument_contract"]["passed"])
+
+            readiness = forge.lifecycle_readiness(record.id)
+            checks = {row["id"]: row["ok"] for row in readiness["checks"]}
+            self.assertTrue(checks["instrument_contract_valid"])
+            self.assertTrue(
+                readiness["integrated_evidence"]["instrument_contract"]["passed"]
+            )
+
+            with self.assertRaisesRegex(ValueError, "currency_contract_mismatch"):
+                forge.create_experiment(
+                    StrategyDefinition(
+                        "contract-rejected",
+                        "1",
+                        {"type": "ma_cross", "symbol": "005930", "fast": 3, "slow": 8},
+                    ),
+                    {
+                        "dataset_id": "bad-fixture",
+                        "currency": "USD",
+                        "quote_unit": "USD_PER_SHARE",
+                    },
+                    {"execution_mode": "REALISTIC"},
+                )
+
+            mixed = normalize_instrument_dataset_contract(
+                {"dataset_id": "mixed-fixture"},
+                ["005930", "NVDA"],
+            )
+            self.assertFalse(mixed["passed"])
+            self.assertIn("mixed_market_dataset_not_supported", mixed["errors"])
+    def test_full_spec_evidence_requires_official_complete_provenance(self) -> None:
+        evidence = {"official": True, "grade": "official_listing_interval_history", "coverage_start": "2000-01-01", "coverage_end": "2026-07-22", "includes_delisted": True, "complete_daily_history": True, "precoverage_listing_dates_clipped": 0}
+        self.assertTrue(_complete_universe_evidence({"evidence": evidence}))
+        self.assertFalse(_complete_universe_evidence({"evidence": {**evidence, "official": False}}))
+        self.assertFalse(_complete_universe_evidence({"evidence": {**evidence, "coverage_start": ""}}))
+        self.assertTrue(_complete_corporate_action_evidence({"complete_history": True, "source_documents_verified": True, "verified_source_document_count": 2}))
+        self.assertFalse(_complete_corporate_action_evidence({"complete_history": True, "source_documents_verified": True, "verified_source_document_count": 0}))
+
     def test_doctor_enforces_research_only_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             forge = ResearchForge.local(Path(directory))
@@ -161,6 +278,19 @@ class ResearchForgeTests(unittest.TestCase):
             provider.verify([{**action, "source_hash": "sha256:" + "0" * 64}], max_bytes=1024, attempts=1)
         with self.assertRaisesRegex(ValueError, "KRX or KIND"):
             provider.verify([{**action, "source_url": "https://example.com/fake"}], max_bytes=1024, attempts=1)
+
+    def test_corporate_action_complete_coverage_and_reconciliation_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = CorporateActionRegistry(Path(directory))
+            actions = [{"type": "SPLIT", "effective_date": "2024-01-02", "new_shares": 2, "old_shares": 1, "source_url": "https://kind.krx.co.kr/split", "source_hash": "sha256:" + "a" * 64}]
+            with self.assertRaisesRegex(ValueError, "verified source documents"):
+                registry.register("unverified-complete", "005930", actions, complete_history=True)
+            registry.register("verified-complete", "005930", actions, complete_history=True, source_documents_verified=True, history_start="2000-01-01", history_end="2026-07-22")
+            result = registry.reconcile(["005930", "000660"], "2000-01-01", "2026-07-22")
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["missing_symbols"], ["000660"])
+            self.assertTrue(result["evidence_hash"].startswith("sha256:"))
+            self.assertFalse(result["order_allowed"])
 
     def test_readiness_separates_operational_from_research_and_full_spec_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -492,6 +622,33 @@ class ResearchForgeTests(unittest.TestCase):
             self.assertEqual(history["run_count"], 0)
             self.assertEqual(history["invalid_files"], [f"{run_id}.json"])
 
+    def test_kis_websocket_resume_preserves_lineage_and_only_runs_remaining_duration(self) -> None:
+        class HeartbeatTransport:
+            def send(self, value): pass
+            def recv(self, timeout):
+                time.sleep(min(0.005, timeout))
+                return json.dumps({"header": {"tr_id": "PINGPONG"}})
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); collector_root = root / "collector"; collector_root.mkdir()
+            previous_id = "realtime_run_" + "a" * 32
+            (collector_root / "checkpoint.json").write_text(json.dumps({
+                "status": "FAILED", "symbols": ["005930"], "run_id": previous_id,
+                "session_chain_id": previous_id, "requested_duration_seconds": 0.05,
+                "last_run": {"run_id": previous_id, "session_chain_id": previous_id, "requested_duration_seconds": 0.05, "elapsed_seconds": 0.02},
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }), encoding="utf-8")
+            collector = ReliableKisRealtimeCollector(collector_root, MicrostructureStore(root / "store"), HeartbeatTransport, "approval-fixture")
+            result = collector.resume_interrupted(heartbeat_timeout=1)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["resume"]["resumed_from_run_id"], previous_id)
+            self.assertEqual(result["run_quality"]["session_chain_id"], previous_id)
+            self.assertEqual(result["run_quality"]["resumed_from_run_id"], previous_id)
+            self.assertAlmostEqual(result["run_quality"]["requested_duration_seconds"], 0.03, places=3)
+            history = realtime_run_history(collector_root)
+            self.assertTrue(history["verified"])
+            self.assertEqual(history["run_count"], 1)
+
     def test_full_session_gate_requires_actual_elapsed_data_and_reconnect_recovery(self) -> None:
         run = {"requested_duration_seconds": 14_400, "elapsed_seconds": 14_400, "duration_completed": True, "completion_reason": "duration_reached", "reconnect_recovery_ok": True, "data_messages": 100, "in_session_quality_ok": True}
         row = {"status": "COMPLETED", "provider": "kis-readonly-websocket", "read_only": True, "order_allowed": False, "run": run}
@@ -775,6 +932,92 @@ class ResearchForgeTests(unittest.TestCase):
                 repo_root=root,
             )
             self.assertTrue(comparison["comparison"]["comparable"])
+
+    def test_async_submit_rejects_invalid_collection_before_persisting_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invalid_payloads = (
+                ({"symbols": ["005930"]}, "requires start and end"),
+                (
+                    {"symbols": ["005930"], "start": "2024/01/01", "end": "2024-01-10"},
+                    "must be ISO dates",
+                ),
+                (
+                    {"symbols": ["005930"], "start": "2024-02-01", "end": "2024-01-10"},
+                    "precedes start date",
+                ),
+            )
+            for payload, message in invalid_payloads:
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    call_research_tool(
+                        "research_async_submit",
+                        {"adapter": "mock", "job_type": "collection", "payload": payload},
+                        runtime_root=root,
+                        repo_root=root,
+                    )
+
+            status = call_research_tool(
+                "research_async_status",
+                {"adapter": "mock"},
+                runtime_root=root,
+                repo_root=root,
+            )
+            self.assertEqual(0, status["job_count"])
+
+    def test_async_submit_accepts_valid_collection_after_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            submitted = call_research_tool(
+                "research_async_submit",
+                {
+                    "adapter": "mock",
+                    "job_type": "collection",
+                    "payload": {
+                        "provider": "mock",
+                        "symbols": ["005930", "005930"],
+                        "start": "2024-01-01",
+                        "end": "2024-01-10",
+                        "timeframe": "1d",
+                    },
+                },
+                runtime_root=root,
+                repo_root=root,
+            )
+            job_id = submitted["job"]["job_id"]
+            final = None
+            for _ in range(300):
+                final = call_research_tool(
+                    "research_async_status",
+                    {"adapter": "mock", "job_id": job_id},
+                    runtime_root=root,
+                    repo_root=root,
+                )["job"]
+                if final["status"] in {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}:
+                    break
+                time.sleep(0.01)
+
+            self.assertIsNotNone(final)
+            self.assertEqual("SUCCEEDED", final["status"])
+            self.assertEqual(["005930"], final["payload"]["symbols"])
+            self.assertEqual("2024-01-01", final["payload"]["start"])
+
+    def test_async_submit_rejects_missing_experiment_before_persisting_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "requires a non-empty experiment_id"):
+                call_research_tool(
+                    "research_async_submit",
+                    {"adapter": "mock", "job_type": "backtest", "payload": {}},
+                    runtime_root=root,
+                    repo_root=root,
+                )
+            status = call_research_tool(
+                "research_async_status",
+                {"adapter": "mock"},
+                runtime_root=root,
+                repo_root=root,
+            )
+            self.assertEqual(0, status["job_count"])
 
     def test_mcp_server_imports_and_declares_every_research_gateway_tool(self) -> None:
         from codexstock_mcp_server import TOOLS
@@ -1578,6 +1821,34 @@ class ResearchForgeTests(unittest.TestCase):
             history = forge.lifecycle().history(record.id)
             self.assertTrue(history["chain_verified"])
             self.assertEqual(history["decision_count"], 1)
+
+            automated = forge.create_experiment(
+                StrategyDefinition("automatic-paper-gate", "1", {"type": "ma_cross", "symbol": "000660", "fast": 3, "slow": 8, "label_horizon_rows": 5}),
+                {"dataset_id": "fixture-v2", "content_hash": "sha256:dataset-v2"},
+                {"execution_mode": "REALISTIC"},
+            )
+            automated.status = ExperimentStatus.VALIDATION
+            automated.result = json.loads(json.dumps(record.result))
+            automated.result["dataset_hash"] = "sha256:dataset-v2"
+            automated.validation = json.loads(json.dumps(record.validation))
+            forge.registry.save(automated)
+            forge.export(automated.id)
+
+            auto_reviewed = forge.auto_nominate_verified_paper(
+                automated.id,
+                scheduler_id="verified-paper-scheduler",
+                rationale="All strict evidence gates passed for Paper-only observation.",
+            )
+
+            self.assertEqual("PAPER_CANDIDATE", auto_reviewed["experiment"]["status"])
+            self.assertEqual("AUTO_NOMINATE_VERIFIED_PAPER", auto_reviewed["decision"]["action"])
+            self.assertEqual("automatic_verified_paper_only", auto_reviewed["decision"]["nomination_mode"])
+            self.assertFalse(auto_reviewed["decision"]["manual_confirmation"])
+            self.assertFalse(auto_reviewed["decision"]["automatic_live_promotion"])
+            self.assertFalse(auto_reviewed["live_order_allowed"])
+            auto_history = forge.lifecycle().history(automated.id)
+            self.assertTrue(auto_history["chain_verified"])
+            self.assertEqual(1, auto_history["decision_count"])
 
     def test_lifecycle_detects_audit_log_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

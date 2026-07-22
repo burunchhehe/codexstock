@@ -810,10 +810,15 @@ class ExternalEngineImprovementStore:
 
     @staticmethod
     def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
+        status = str(task.get("status") or "")
+        resolved = status in {"RESOLVED", "SUPERSEDED"}
+        original_contract_errors = list(task.get("contract_errors") or [])
+        original_quality_blockers = list(task.get("quality_blockers") or [])
+        current_blockers = list(task.get("resolution_blockers") or [])
         return {
             "task_id": task.get("task_id"),
             "engine_id": task.get("engine_id"),
-            "status": task.get("status"),
+            "status": status,
             "requested_action": task.get("requested_action"),
             "attempt_count": _safe_int(task.get("attempt_count")),
             "max_attempts": max(1, _safe_int(task.get("max_attempts")) or 3),
@@ -822,9 +827,12 @@ class ExternalEngineImprovementStore:
             "claimed_cycle_id": task.get("claimed_cycle_id"),
             "last_attempt_cycle_id": task.get("last_attempt_cycle_id"),
             "resolved_cycle_id": task.get("resolved_cycle_id"),
-            "quality_blockers": task.get("quality_blockers") or [],
-            "contract_errors": task.get("contract_errors") or [],
-            "resolution_blockers": task.get("resolution_blockers") or [],
+            "current_contract_errors": [] if resolved else original_contract_errors,
+            "current_quality_blockers": current_blockers if resolved else original_quality_blockers,
+            "original_contract_errors": original_contract_errors,
+            "original_quality_blockers": original_quality_blockers,
+            "resolution_blockers": current_blockers,
+            "currently_healthy": bool(resolved and not current_blockers),
             "score_allowed": False,
             "promotion_allowed": False,
             "live_order_allowed": False,
@@ -832,16 +840,22 @@ class ExternalEngineImprovementStore:
 
     @staticmethod
     def _task_resolution_summary(task: dict[str, Any]) -> dict[str, Any]:
-        blockers = list(task.get("contract_errors") or []) + list(
-            task.get("resolution_blockers") or task.get("quality_blockers") or []
+        status = str(task.get("status") or "")
+        historical_blockers = list(task.get("contract_errors") or []) + list(
+            task.get("quality_blockers") or []
         )
+        blockers = list(task.get("resolution_blockers") or [])
+        if status not in {"RESOLVED", "SUPERSEDED"} and not blockers:
+            blockers = historical_blockers
         return {
             "task_id": task.get("task_id"),
             "engine_id": task.get("engine_id"),
-            "status": task.get("status"),
+            "status": status,
             "attempt_count": _safe_int(task.get("attempt_count")),
             "max_attempts": max(1, _safe_int(task.get("max_attempts")) or 3),
             "blocker_summary": ",".join(str(item) for item in blockers)[:1000],
+            "historical_blocker_summary": ",".join(str(item) for item in historical_blockers)[:1000],
+            "currently_healthy": bool(status in {"RESOLVED", "SUPERSEDED"} and not blockers),
             "resolved_cycle_id": task.get("resolved_cycle_id"),
             "last_attempt_cycle_id": task.get("last_attempt_cycle_id"),
             "score_allowed": False,

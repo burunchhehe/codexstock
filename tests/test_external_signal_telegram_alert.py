@@ -1,4 +1,5 @@
 import unittest
+import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -6,13 +7,19 @@ from unittest.mock import patch
 from app.stock_suite_app import (
     _build_external_signal_news_verification,
     _external_signal_alert_items,
+    _external_signal_alert_semantic_signature,
+    _external_context_verification_semantic_key,
     _external_signal_context_coverage,
     _external_signal_promotion_audit,
+    _external_signal_report_semantic_signature,
+    _external_signal_verification_semantic_key,
     _enqueue_external_context_verification_requests,
+    _enqueue_external_signal_verification_requests,
     _normalize_external_signal_report,
     _normalize_external_signal_sources,
     _queue_external_signal_telegram_alert,
     build_external_signal_telegram_text,
+    receive_external_signal_report,
 )
 
 
@@ -87,6 +94,51 @@ class ExternalSignalTelegramAlertTests(unittest.TestCase):
         self.assertIn("검색 관심도 급증", text)
         self.assertIn("실제 주문하지 않습니다", text)
         self.assertLessEqual(len(text), 1200)
+
+    def test_semantic_signature_ignores_scan_time_and_changing_counters(self):
+        first = self._report()
+        second = self._report()
+        second["generated_at"] = "2026-07-14T16:45:00+09:00"
+        second["market_context"][0]["source_count"] = 99
+        second["market_context"][0]["confidence"] = 0.95
+        second["signals"][0]["source_count"] = 30
+        second["signals"][0]["confidence"] = 0.9
+        self.assertEqual(
+            _external_signal_alert_semantic_signature(first),
+            _external_signal_alert_semantic_signature(second),
+        )
+
+    def test_semantic_signature_changes_when_core_evidence_changes(self):
+        first = self._report()
+        second = self._report()
+        second["urgent_triggers"][0]["reason"] = "materially changed evidence"
+        self.assertNotEqual(
+            _external_signal_alert_semantic_signature(first),
+            _external_signal_alert_semantic_signature(second),
+        )
+
+    def test_report_and_queue_semantics_ignore_scan_only_changes(self):
+        first = self._report()
+        second = self._report()
+        second["generated_at"] = "2026-07-14T17:00:00+09:00"
+        second["signals"][0]["signal_id"] = "new-scan-id"
+        second["signals"][0]["source_count"] = 50
+        second["signals"][0]["confidence"] = 0.99
+        second["market_context"][0]["context_id"] = "new-context-id"
+        second["market_context"][0]["source_count"] = 50
+        second["market_context"][0]["confidence"] = 0.99
+        self.assertEqual(
+            _external_signal_report_semantic_signature(first),
+            _external_signal_report_semantic_signature(second),
+        )
+        self.assertEqual(
+            _external_signal_verification_semantic_key(first["signals"][0]),
+            _external_signal_verification_semantic_key(second["signals"][0]),
+        )
+        self.assertEqual(
+            _external_context_verification_semantic_key(first["market_context"][0]),
+            _external_context_verification_semantic_key(second["market_context"][0]),
+        )
 
     def test_context_coverage_exposes_missing_market_information(self):
         coverage = _external_signal_context_coverage(self._report()["market_context"])
@@ -375,6 +427,11 @@ class ExternalSignalTelegramAlertTests(unittest.TestCase):
 
     def test_market_context_enters_separate_verify_only_queue(self):
         report = self._report()
+        repeated_report = self._report()
+        repeated_report["generated_at"] = "2026-07-14T16:45:00+09:00"
+        repeated_report["market_context"][0]["context_id"] = "CTX-FLOW-NEW-SCAN"
+        repeated_report["market_context"][0]["source_count"] = 30
+        repeated_report["market_context"][0]["confidence"] = 0.99
         with TemporaryDirectory() as directory, patch(
             "app.stock_suite_app.EXTERNAL_CONTEXT_VERIFICATION_QUEUE_FILE",
             Path(directory) / "context_queue.jsonl",
@@ -386,7 +443,7 @@ class ExternalSignalTelegramAlertTests(unittest.TestCase):
                 report_signature="sig-1",
             )
             duplicate_count = _enqueue_external_context_verification_requests(
-                report,
+                repeated_report,
                 received_at="2026-07-14T16:32:00+09:00",
                 source="test",
                 report_signature="sig-1",
@@ -398,17 +455,104 @@ class ExternalSignalTelegramAlertTests(unittest.TestCase):
             self.assertFalse(row["score_allowed"])
             self.assertFalse(row["live_order_allowed"])
 
+    def test_signal_queue_dedupes_new_scan_id_when_evidence_is_unchanged(self):
+        report = self._report()
+        report["signals"] = [report["signals"][0]]
+        report["signals"][0]["signal_id"] = "SIG-FIRST-SCAN"
+        repeated_report = self._report()
+        repeated_report["generated_at"] = "2026-07-14T16:45:00+09:00"
+        repeated_report["signals"] = [repeated_report["signals"][0]]
+        repeated_report["signals"][0]["signal_id"] = "SIG-SECOND-SCAN"
+        repeated_report["signals"][0]["source_count"] = 30
+        repeated_report["signals"][0]["confidence"] = 0.99
+        with TemporaryDirectory() as directory, patch(
+            "app.stock_suite_app.EXTERNAL_SIGNAL_VERIFICATION_QUEUE_FILE",
+            Path(directory) / "signal_queue.jsonl",
+        ):
+            first_count = _enqueue_external_signal_verification_requests(
+                report,
+                received_at="2026-07-14T16:31:00+09:00",
+                source="test",
+                report_signature="sig-1",
+            )
+            repeated_count = _enqueue_external_signal_verification_requests(
+                repeated_report,
+                received_at="2026-07-14T16:46:00+09:00",
+                source="test",
+                report_signature="sig-2",
+            )
+            self.assertEqual(1, first_count)
+            self.assertEqual(0, repeated_count)
+            row = __import__("json").loads(
+                (Path(directory) / "signal_queue.jsonl").read_text(encoding="utf-8")
+            )
+            self.assertEqual(64, len(row["semantic_key"]))
+            self.assertFalse(row["live_order_allowed"])
+
+    def test_receiver_skips_repeated_semantic_report_work_and_alert(self):
+        first = self._report()
+        second = copy.deepcopy(first)
+        second["generated_at"] = "2026-07-14T16:45:00+09:00"
+        second["signals"][0]["signal_id"] = "SIG-SECOND-SCAN"
+        second["signals"][0]["source_count"] = 30
+        second["signals"][0]["confidence"] = 0.99
+        second["market_context"][0]["context_id"] = "CTX-SECOND-SCAN"
+        second["market_context"][0]["source_count"] = 30
+        second["market_context"][0]["confidence"] = 0.99
+        with TemporaryDirectory() as directory, patch(
+            "app.stock_suite_app.EXTERNAL_SIGNAL_LATEST_FILE",
+            Path(directory) / "latest.json",
+        ), patch(
+            "app.stock_suite_app.EXTERNAL_SIGNAL_RECEIPT_FILE",
+            Path(directory) / "receipts.jsonl",
+        ), patch(
+            "app.stock_suite_app._normalize_external_signal_report",
+            side_effect=[(first, []), (second, [])],
+        ), patch(
+            "app.stock_suite_app._build_external_signal_news_verification",
+            return_value={},
+        ), patch(
+            "app.stock_suite_app._ensure_external_signal_stage2_snapshot",
+            return_value={"ready": False, "status": "NO_SIGNAL_SYMBOLS"},
+        ), patch(
+            "app.stock_suite_app._enqueue_external_signal_verification_requests",
+            return_value=1,
+        ) as enqueue_signal, patch(
+            "app.stock_suite_app._enqueue_external_context_verification_requests",
+            return_value=1,
+        ) as enqueue_context, patch(
+            "app.stock_suite_app._reconcile_external_signal_snapshot_queue",
+            return_value={"verified": 0, "blocked": 0, "skipped": 0},
+        ), patch(
+            "app.stock_suite_app._queue_external_signal_telegram_alert",
+            return_value={"id": "TG-FIRST", "status": "queued"},
+        ) as queue_alert:
+            first_receipt, first_status = receive_external_signal_report({}, source="test")
+            second_receipt, second_status = receive_external_signal_report({}, source="test")
+
+        self.assertEqual(200, first_status)
+        self.assertEqual(200, second_status)
+        self.assertTrue(first_receipt["telegram_alert_queued"])
+        self.assertTrue(second_receipt["semantic_report_duplicate"])
+        self.assertTrue(second_receipt["telegram_alert_semantic_duplicate"])
+        self.assertEqual("semantic_duplicate", second_receipt["telegram_alert_status"])
+        self.assertEqual(1, enqueue_signal.call_count)
+        self.assertEqual(1, enqueue_context.call_count)
+        self.assertEqual(1, queue_alert.call_count)
+
     @patch("app.stock_suite_app.OPS.queue_telegram")
-    def test_queue_uses_dedicated_type_and_never_allows_live_order(self, queue_telegram):
-        queue_telegram.return_value = {"id": "TG-1", "status": "queued"}
+    def test_external_report_stays_internal_and_never_enters_telegram(self, queue_telegram):
         result = _queue_external_signal_telegram_alert(
             self._report(), report_signature="abc123", source="external-info-scout"
         )
-        self.assertEqual("queued", result["status"])
-        kwargs = queue_telegram.call_args.kwargs
-        self.assertEqual("external_signal_alert", kwargs["message_type"])
-        self.assertFalse(kwargs["metadata"]["live_order_allowed"])
-        self.assertTrue(kwargs["metadata"]["verification_required"])
+        self.assertEqual("internal_only", result["status"])
+        self.assertFalse(result["queued"])
+        self.assertEqual("external-scout->codexstock-verification", result["route"])
+        self.assertFalse(result["live_order_allowed"])
+        self.assertTrue(result["verification_required"])
+        self.assertTrue(result["single_delivery_id"].startswith("external-signal-alert:2026-07-14:"))
+        self.assertEqual(64, len(result["semantic_signature"]))
+        queue_telegram.assert_not_called()
 
     @patch("app.stock_suite_app.OPS.queue_telegram")
     def test_non_urgent_report_does_not_enter_outbox(self, queue_telegram):

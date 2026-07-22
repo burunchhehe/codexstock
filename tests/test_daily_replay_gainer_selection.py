@@ -88,6 +88,8 @@ class DailyReplayGainerSelectionTests(unittest.TestCase):
         self.assertEqual(2, result["today_mover_count"])
         self.assertEqual(1, result["analysis_only_mover_count"])
         self.assertFalse(result["today_movers"][0]["analysis_only"])
+        self.assertEqual("kis_intraday", result["today_movers"][0]["turnover_verification_source"])
+        self.assertEqual("unavailable_or_not_matched", result["today_movers"][0]["krx_crosscheck_status"])
         self.assertTrue(result["today_movers"][1]["analysis_only"])
         self.assertFalse(result["today_movers"][1]["replay_turnover_verified"])
         self.assertTrue(result["symbol_selection_contract"]["analysis_only_does_not_enable_live_order"])
@@ -134,6 +136,8 @@ class DailyReplayGainerSelectionTests(unittest.TestCase):
         self.assertEqual(123.4, mover["amount_eok"])
         self.assertEqual("complete_for_replay", mover["data_quality"])
         self.assertEqual("krx_daily_crosscheck", mover["turnover_source"])
+        self.assertEqual("krx_daily_crosscheck", mover["turnover_verification_source"])
+        self.assertEqual("matched", mover["krx_crosscheck_status"])
         self.assertTrue(mover["replay_turnover_verified"])
         self.assertTrue(mover["replay_analysis_eligible"])
         self.assertFalse(mover["live_candidate_eligible"])
@@ -183,6 +187,7 @@ class DailyReplayGainerSelectionTests(unittest.TestCase):
         self.assertEqual("incomplete_turnover", mover["data_quality"])
         self.assertFalse(mover["turnover_crosscheck"]["date_match"])
         self.assertFalse(mover["replay_turnover_verified"])
+        self.assertEqual("none", mover["turnover_verification_source"])
         self.assertEqual(0, result["krx_crosschecked_mover_count"])
 
     def test_explicit_symbols_override_gainer_selection(self):

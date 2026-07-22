@@ -219,14 +219,37 @@ class LearningMemoryTraceTests(unittest.TestCase):
             },
         }
         with (
-            patch("app.stock_suite_app.build_ai_learning_insights", return_value=insight),
             patch("app.stock_suite_app._agent_cache_load", return_value={"payload": {"candidates": [candidate]}}),
         ):
-            result = _learning_memory_feature_probe()
+            result = _learning_memory_feature_probe(insight_override=insight)
 
         self.assertEqual(result["status"], "review_required")
         self.assertEqual(result["summary"]["trace_mismatch_count"], 1)
         self.assertEqual(result["summary"]["score_delta_mismatch_count"], 1)
+
+    def test_feature_probe_returns_stale_snapshot_while_one_refresh_starts(self):
+        insight = {
+            "generated_at": "2026-07-01T00:00:00+09:00",
+            "learning_memory_policy_version": LEARNING_MEMORY_POLICY_VERSION,
+            "learning_score": 70.0,
+            "learning_evidence_fingerprint": "global-evidence",
+            "meeting_learning_evidence": [],
+            "replay_bias_evidence": [],
+            "reflection_learning_evidence": [],
+            "live_realized_evidence": [],
+            "score_eligible_evidence_count": 0,
+        }
+        with (
+            patch("app.stock_suite_app._start_learning_memory_refresh", return_value=True) as refresh,
+            patch("app.stock_suite_app._agent_cache_load", return_value={"payload": {"candidates": []}}),
+        ):
+            result = _learning_memory_feature_probe(insight_override=insight)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["learning_snapshot_stale"])
+        self.assertTrue(result["background_refresh_started"])
+        self.assertEqual("stale_while_revalidate", result["health_probe_mode"])
+        refresh.assert_called_once_with()
 
     def test_screener_cache_refreshes_only_learning_trace_without_market_rebuild(self):
         components = {

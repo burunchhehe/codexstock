@@ -42,6 +42,25 @@ def _parse_external_json(stdout: str) -> dict[str, Any]:
     return {}
 
 
+def _external_process_error(stderr: str, returncode: int) -> tuple[str, str]:
+    detail = str(stderr or "").strip()[:2000]
+    lowered = detail.lower()
+    if "application control policy" in lowered or "애플리케이션 제어 정책" in detail:
+        return "windows_code_integrity_blocked", detail
+    if returncode != 0:
+        return "external_engine_process_failed", detail
+    return "invalid_external_engine_json", detail
+
+
+def _windows_path_to_wsl(path: Path) -> str:
+    resolved = Path(path).resolve()
+    drive = resolved.drive.rstrip(":").lower()
+    if not drive:
+        return str(resolved).replace("\\", "/")
+    suffix = str(resolved)[len(resolved.drive):].replace("\\", "/").lstrip("/")
+    return f"/mnt/{drive}/{suffix}"
+
+
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -412,13 +431,47 @@ class NautilusRuntime:
         self.runtime_root = engines / "nautilus_trader" / NAUTILUS_RUNTIME_FOLDER
         self.python_path = self.runtime_root / ".venv" / "Scripts" / "python.exe"
         self.worker_path = self.repo_root / "tools" / "external_engines" / "nautilus_worker.py"
+        self.wsl_config_path = engines / "nautilus_trader" / "wsl_runtime.json"
+        self.wsl_config = self._load_wsl_config()
         self._lock = threading.Lock()
         self._engine_id = "nautilus-trader"
         self.evidence_path = _external_run_evidence_path(self.repo_root, self._engine_id)
         self._last_run: dict[str, Any] = _load_last_run_evidence(self.evidence_path)
 
+    def _load_wsl_config(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.wsl_config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(value, dict) or value.get("enabled") is not True:
+            return {}
+        return value
+
+    def _runtime_command(self, *, worker: bool) -> tuple[list[str], str]:
+        if self.wsl_config:
+            wsl_executable = str(
+                self.wsl_config.get("wsl_executable")
+                or (Path(os.environ.get("WINDIR") or r"C:\Windows") / "System32" / "wsl.exe")
+            )
+            command = [
+                wsl_executable,
+                "-d",
+                str(self.wsl_config.get("distribution") or "Ubuntu"),
+                "-u",
+                str(self.wsl_config.get("user") or "root"),
+                "--",
+                str(self.wsl_config.get("python_path") or "/opt/codexstock/nautilus/.venv/bin/python"),
+            ]
+            if worker:
+                command.append(_windows_path_to_wsl(self.worker_path))
+            return command, str(self.repo_root)
+        command = [str(self.python_path)]
+        if worker:
+            command.append(str(self.worker_path))
+        return command, str(self.runtime_root)
+
     def status(self, *, probe: bool = False) -> dict[str, Any]:
-        installed = self.python_path.is_file()
+        installed = self.python_path.is_file() or bool(self.wsl_config)
         worker_ready = self.worker_path.is_file()
         result: dict[str, Any] = {
             "ok": installed and worker_ready,
@@ -429,6 +482,8 @@ class NautilusRuntime:
             "runtime_mode": "spawn_on_demand_only",
             "runtime_root": str(self.runtime_root),
             "python_path": str(self.python_path),
+            "runtime_backend": "wsl2_linux" if self.wsl_config else "windows_native",
+            "wsl_distribution": self.wsl_config.get("distribution", "") if self.wsl_config else "",
             "worker_path": str(self.worker_path),
             "engine_version": "1.230.0",
             "release_commit": NAUTILUS_RELEASE_COMMIT,
@@ -438,9 +493,21 @@ class NautilusRuntime:
         }
         if probe and result["ok"]:
             try:
+                command, cwd = self._runtime_command(worker=False)
+                command.extend(
+                    [
+                        "-c",
+                        (
+                            "import nautilus_trader; "
+                            "from nautilus_trader.backtest.engine import BacktestEngine; "
+                            "from nautilus_trader.model.instruments import Equity; "
+                            "print(nautilus_trader.__version__)"
+                        ),
+                    ]
+                )
                 completed = _run_external_process(
-                    [str(self.python_path), "-c", "import nautilus_trader; print(nautilus_trader.__version__)"],
-                    cwd=str(self.runtime_root),
+                    command,
+                    cwd=cwd,
                     capture_output=True,
                     text=True,
                     timeout=60,
@@ -448,11 +515,15 @@ class NautilusRuntime:
                     check=False,
                 )
                 result["probe_ok"] = completed.returncode == 0
+                result["native_runtime_ready"] = completed.returncode == 0
                 result["engine_version"] = completed.stdout.strip()[:80]
                 if completed.returncode != 0:
-                    result["probe_error"] = completed.stderr.strip()[:300]
+                    error, detail = _external_process_error(completed.stderr, completed.returncode)
+                    result["probe_error_code"] = error
+                    result["probe_error"] = detail[:600]
             except (OSError, subprocess.TimeoutExpired) as exc:
                 result["probe_ok"] = False
+                result["native_runtime_ready"] = False
                 result["probe_error"] = str(exc)[:300]
         return result
 
@@ -490,9 +561,10 @@ class NautilusRuntime:
             "live_order_allowed": False,
         }
         try:
+            command, cwd = self._runtime_command(worker=True)
             completed = _run_external_process(
-                [str(self.python_path), str(self.worker_path)],
-                cwd=str(self.runtime_root),
+                command,
+                cwd=cwd,
                 input=json.dumps(request, ensure_ascii=True, allow_nan=False, separators=(",", ":")),
                 capture_output=True,
                 text=True,
@@ -585,9 +657,10 @@ class NautilusRuntime:
             "live_order_allowed": False,
         }
         try:
+            command, cwd = self._runtime_command(worker=True)
             completed = _run_external_process(
-                [str(self.python_path), str(self.worker_path)],
-                cwd=str(self.runtime_root),
+                command,
+                cwd=cwd,
                 input=json.dumps(request, ensure_ascii=True, allow_nan=False, separators=(",", ":")),
                 capture_output=True,
                 text=True,
@@ -597,10 +670,10 @@ class NautilusRuntime:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 check=False,
             )
-            result = _parse_external_json(completed.stdout[:500_000]) or {
-                "ok": False,
-                "error": "invalid_external_engine_json",
-            }
+            result = _parse_external_json(completed.stdout)
+            if not result:
+                error, detail = _external_process_error(completed.stderr, completed.returncode)
+                result = {"ok": False, "error": error, "detail": detail}
             result["process_returncode"] = completed.returncode
             result["runtime_elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
             result["stderr"] = completed.stderr[:30_000] if completed.returncode != 0 else ""
@@ -619,10 +692,13 @@ class NautilusRuntime:
                 "unfilled_passed": bool(quality_gate.get("unfilled_passed")),
                 "latency_passed": bool(quality_gate.get("latency_passed")),
                 "orderbook_event_count": int(orderbook.get("event_count") or 0),
+                "error": str(result.get("error") or "")[:300],
+                "detail": str(result.get("detail") or result.get("stderr") or "")[:1000],
+                "process_returncode": completed.returncode,
             })
             return result
         except subprocess.TimeoutExpired:
-            return {
+            timeout_result = {
                 "ok": False,
                 "engine_name": "NautilusTrader",
                 "error": "external_engine_timeout",
@@ -630,6 +706,21 @@ class NautilusRuntime:
                 "runtime_mode": "spawn_on_demand_only",
                 "live_order_allowed": False,
             }
+            self._last_run = _persist_last_run_evidence(
+                self.evidence_path,
+                self._engine_id,
+                {
+                    "ok": False,
+                    "finished_at_epoch": time.time(),
+                    "runtime_elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+                    "snapshot_id": str(snapshot_meta.get("snapshot_id") or ""),
+                    "result_hash": "",
+                    "action": "evaluate_execution_stress",
+                    "error": "external_engine_timeout",
+                    "timeout_seconds": int(timeout_seconds),
+                },
+            )
+            return timeout_result
         except OSError as exc:
             return {
                 "ok": False,

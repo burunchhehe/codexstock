@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -187,6 +190,57 @@ def _safe_int(value: Any) -> int:
         return int(float(str(value).replace(",", "")))
     except (TypeError, ValueError):
         return 0
+
+
+def _kis_previous_close(output: dict[str, Any], price: float) -> float:
+    previous_close = _safe_float(output.get("stck_sdpr")) or _safe_float(output.get("prdy_clpr"))
+    if previous_close > 0:
+        return previous_close
+    change = _safe_float(output.get("prdy_vrss"))
+    if price > 0 and change:
+        derived = price - change
+        if derived > 0:
+            return derived
+    change_pct = _safe_float(output.get("prdy_ctrt"))
+    if price > 0 and change_pct > -99.0:
+        derived = price / (1.0 + change_pct / 100.0)
+        if derived > 0:
+            return derived
+    return 0.0
+
+
+def _kis_quote_contract_issues(
+    output: dict[str, Any],
+    *,
+    price: float,
+    previous_close: float,
+) -> list[str]:
+    issues: list[str] = []
+    high_price = _safe_float(output.get("stck_hgpr"))
+    low_price = _safe_float(output.get("stck_lwpr"))
+    upper_limit = _safe_float(output.get("stck_mxpr"))
+    lower_limit = _safe_float(output.get("stck_llam"))
+    if price <= 0:
+        issues.append("non_positive_current_price")
+    elif abs(price - round(price)) > 0.001:
+        issues.append("fractional_krw_current_price")
+    if previous_close <= 0:
+        issues.append("previous_close_missing")
+    if high_price > 0 and low_price > 0:
+        if high_price < low_price:
+            issues.append("high_low_inverted")
+        elif price > 0 and not low_price * 0.99 <= price <= high_price * 1.01:
+            issues.append("current_price_outside_daily_range")
+    if upper_limit > 0 and price > upper_limit * 1.001:
+        issues.append("current_price_above_upper_limit")
+    if lower_limit > 0 and 0 < price < lower_limit * 0.999:
+        issues.append("current_price_below_lower_limit")
+    if previous_close > 0 and output.get("prdy_ctrt") not in {None, ""}:
+        observed_change_pct = _safe_float(output.get("prdy_ctrt"))
+        implied_change_pct = (price / previous_close - 1.0) * 100.0
+        if abs(implied_change_pct - observed_change_pct) > 0.75:
+            issues.append("change_pct_inconsistent")
+    return issues
 
 
 def _optional_float(value: Any) -> float | None:
@@ -521,9 +575,14 @@ class KisReadonlyBridge:
             }
         output = payload.get("output") or {}
         price = _safe_float(output.get("stck_prpr"))
-        previous_close = _safe_float(output.get("prdy_clpr")) or price
+        previous_close = _kis_previous_close(output, price)
+        price_contract_issues = _kis_quote_contract_issues(
+            output,
+            price=price,
+            previous_close=previous_close,
+        )
         return {
-            "ok": price > 0,
+            "ok": price > 0 and not price_contract_issues,
             "symbol": sym,
             "name": output.get("hts_kor_isnm") or sym,
             "price": price,
@@ -543,6 +602,10 @@ class KisReadonlyBridge:
             "short_overheat_yn": str(output.get("short_over_yn") or "").strip().upper(),
             "risk_fields_observed": True,
             "timestamp": output.get("stck_cntg_hour") or "",
+            "currency": "KRW",
+            "unit_scale": 1,
+            "price_contract_ok": not price_contract_issues,
+            "price_contract_issues": price_contract_issues,
             "source": "kis_readonly",
             "mode": self.settings.kis_mode,
             "message": "정상",
@@ -625,6 +688,8 @@ class KisReadonlyBridge:
             "source": "kis_orderbook",
             "mode": self.settings.kis_mode,
             "timestamp": output.get("stck_cntg_hour") or output.get("aspr_acpt_hour") or "",
+            "currency": "KRW",
+            "unit_scale": 1,
             "price": current_or_expected,
             "best_ask": best_ask,
             "best_bid": best_bid,
@@ -1379,6 +1444,7 @@ class KisReadonlyBridge:
             output = []
         safe_limit = max(1, min(int(limit or 30), 30))
         rows: list[dict[str, Any]] = []
+        filtered_zero_activity_count = 0
         for item in output[:safe_limit]:
             if not isinstance(item, dict):
                 continue
@@ -1389,14 +1455,19 @@ class KisReadonlyBridge:
             price = _safe_float(item.get("stck_prpr"))
             amount = _safe_int(item.get("acml_tr_pbmn"))
             volume = _safe_int(item.get("acml_vol"))
+            change = _safe_float(item.get("prdy_vrss"))
+            change_pct = _safe_float(item.get("prdy_ctrt"))
+            if volume <= 0 and amount <= 0 and abs(change) <= 0 and abs(change_pct) <= 0:
+                filtered_zero_activity_count += 1
+                continue
             rows.append(
                 {
                     "rank": _safe_int(item.get("data_rank")),
                     "symbol": symbol,
                     "name": name,
                     "price": price,
-                    "change": _safe_float(item.get("prdy_vrss")),
-                    "change_pct": _safe_float(item.get("prdy_ctrt")),
+                    "change": change,
+                    "change_pct": change_pct,
                     "volume": volume,
                     "previous_volume": _safe_int(item.get("prdy_vol")),
                     "avg_volume": _safe_int(item.get("avrg_vol")),
@@ -1410,8 +1481,9 @@ class KisReadonlyBridge:
                     "raw": item,
                 }
             )
-        return {
+        result = {
             "ok": bool(rows),
+            "status": "ready" if rows else "no_active_market_data",
             "source": "kis_volume_rank",
             "mode": self.settings.kis_mode,
             "rank_kind": kind,
@@ -1420,8 +1492,14 @@ class KisReadonlyBridge:
             "market_code": market_code,
             "items": rows,
             "count": len(rows),
+            "raw_count": len(output[:safe_limit]),
+            "filtered_zero_activity_count": filtered_zero_activity_count,
             "message": str(payload.get("msg1") or ("정상" if rows else "KIS 거래대금 순위 데이터가 비어 있습니다.")),
         }
+
+        if not rows:
+            result["message"] = "장전에는 거래량·거래대금 순위가 아직 형성되지 않았습니다. 장 시작 후 다시 확인합니다."
+        return result
 
     def fluctuation_rank(
         self,
@@ -1485,6 +1563,7 @@ class KisReadonlyBridge:
             output = []
         safe_limit = max(1, min(int(limit or 30), 30))
         rows: list[dict[str, Any]] = []
+        filtered_zero_activity_count = 0
         for item in output[:safe_limit]:
             if not isinstance(item, dict):
                 continue
@@ -1499,26 +1578,33 @@ class KisReadonlyBridge:
             name = str(item.get("hts_kor_isnm") or item.get("hts_kor_isnm") or item.get("name") or symbol).strip()
             price = _safe_float(item.get("stck_prpr") or item.get("stck_prpr"))
             amount = _safe_int(item.get("acml_tr_pbmn") or item.get("acml_tr_pbmn"))
+            volume = _safe_int(item.get("acml_vol"))
+            change = _safe_float(item.get("prdy_vrss"))
+            change_pct = _safe_float(item.get("prdy_ctrt") or item.get("prdy_ctrt"))
+            if volume <= 0 and amount <= 0 and abs(change) <= 0 and abs(change_pct) <= 0:
+                filtered_zero_activity_count += 1
+                continue
             rows.append(
                 {
                     "rank": _safe_int(item.get("data_rank")),
                     "symbol": symbol,
                     "name": name,
                     "price": price,
-                    "change": _safe_float(item.get("prdy_vrss")),
-                    "change_pct": _safe_float(item.get("prdy_ctrt") or item.get("prdy_ctrt")),
+                    "change": change,
+                    "change_pct": change_pct,
                     "open_change_pct": _safe_float(item.get("oprc_vrss_prpr_rate")),
                     "low_change_pct": _safe_float(item.get("lwpr_vrss_prpr_rate")),
                     "high_change_pct": _safe_float(item.get("hgpr_vrss_prpr_rate")),
-                    "volume": _safe_int(item.get("acml_vol")),
+                    "volume": volume,
                     "amount": amount,
                     "amount_eok": round(amount / 100_000_000, 1) if amount else 0.0,
                     "source": "kis_fluctuation_rank",
                     "raw": item,
                 }
             )
-        return {
+        result = {
             "ok": bool(rows),
+            "status": "ready" if rows else "no_active_market_data",
             "source": "kis_fluctuation_rank",
             "mode": self.settings.kis_mode,
             "direction": "down" if sort_code == "1" else "up",
@@ -1527,8 +1613,14 @@ class KisReadonlyBridge:
             "market_code": market_code,
             "items": rows,
             "count": len(rows),
+            "raw_count": len(output[:safe_limit]),
+            "filtered_zero_activity_count": filtered_zero_activity_count,
             "message": str(payload.get("msg1") or ("정상" if rows else "KIS 등락률 순위 데이터가 비어 있습니다.")),
         }
+
+        if not rows:
+            result["message"] = "장전에는 상승·하락 순위가 아직 형성되지 않았습니다. 장 시작 후 다시 확인합니다."
+        return result
 
     def volume_power_rank(
         self,
@@ -2297,6 +2389,8 @@ class KisReadonlyBridge:
             "ok": True,
             "source": "kis_daily_executions",
             "mode": self.settings.kis_mode,
+            "currency": "KRW",
+            "unit_scale": 1,
             "mock": bool(self.settings.kis_use_mock),
             "status": raw_status,
             "message": message,
@@ -2552,6 +2646,8 @@ class KisReadonlyBridge:
             "account_masked": _mask(self.settings.kis_account_no),
             "product_code": self.settings.kis_product_code,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "currency": "KRW",
+            "unit_scale": 1,
             "summary": {
                 "cash": operating_cash,
                 "available_cash": available_cash,
@@ -3393,6 +3489,49 @@ class AiTraderDesk:
         return "\n".join(lines)
 
 
+TELEGRAM_TEXT_LIMIT = 3800
+
+
+def telegram_text_integrity(text: str) -> dict[str, Any]:
+    """Normalize Telegram text and detect irreversible encoding loss."""
+    original = str(text or "")
+    normalized = unicodedata.normalize("NFC", original)
+    normalized = "".join(
+        character
+        for character in normalized
+        if character in {"\n", "\t"} or (ord(character) >= 32 and ord(character) != 127)
+    )
+    reasons: list[str] = []
+    if "\ufffd" in normalized:
+        reasons.append("unicode_replacement_character")
+    if re.search(r"\?{3,}", normalized):
+        reasons.append("question_mark_loss_run")
+    try:
+        normalized.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        reasons.append("invalid_utf8_scalar")
+    digest = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return {
+        "ok": not reasons,
+        "text": normalized,
+        "sha256": digest,
+        "original_chars": len(original),
+        "normalized_chars": len(normalized),
+        "reasons": reasons,
+    }
+
+
+def _telegram_integrity_fallback(integrity: dict[str, Any]) -> str:
+    reasons = ", ".join(str(item) for item in integrity.get("reasons", [])) or "unknown"
+    return (
+        "[코덱스스톡 보고 보호]\n"
+        "한글 또는 문자 손상이 감지되어 깨진 원문 발송을 차단했습니다.\n"
+        "내부 개발자가 보고서 생성 경로와 UTF-8 인코딩을 점검해야 합니다.\n"
+        f"진단 코드: {reasons}\n"
+        f"내용 해시: {integrity.get('sha256', '')}"
+    )
+
+
 class TelegramBridge:
     def __init__(self, settings: IntegrationSettings) -> None:
         self.settings = settings
@@ -3407,6 +3546,76 @@ class TelegramBridge:
         }
 
     def send_message(self, text: str) -> dict[str, Any]:
+        status = self.status()
+        if not status["enabled"]:
+            return {"ok": False, "sent": False, "message": "텔레그램이 비활성화되어 있습니다.", "status": status}
+        if not status["configured"]:
+            return {"ok": False, "sent": False, "message": "텔레그램 토큰 또는 채팅 ID가 없습니다.", "status": status}
+
+        integrity = telegram_text_integrity(text)
+        outbound_text = str(integrity.get("text", ""))
+        used_integrity_fallback = not bool(integrity.get("ok"))
+        if used_integrity_fallback:
+            outbound_text = _telegram_integrity_fallback(integrity)
+        integrity_evidence = {key: value for key, value in integrity.items() if key != "text"}
+
+        if status["dry_run"] or status["stub"]:
+            return {
+                "ok": True,
+                "sent": False,
+                "message": "텔레그램 드라이런 모드입니다.",
+                "status": status,
+                "delivery_status": "dry_run_integrity_fallback" if used_integrity_fallback else "dry_run",
+                "used_integrity_fallback": used_integrity_fallback,
+                "text_integrity": integrity_evidence,
+                "preview": outbound_text[:800],
+            }
+
+        url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/sendMessage"
+        payload = json.dumps(
+            {
+                "chat_id": self.settings.telegram_chat_id,
+                "text": outbound_text[:TELEGRAM_TEXT_LIMIT],
+                "disable_web_page_preview": True,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            safe_error = str(exc).replace(self.settings.telegram_bot_token, "***")
+            return {
+                "ok": False,
+                "sent": False,
+                "message": safe_error,
+                "status": status,
+                "delivery_status": "network_error",
+                "used_integrity_fallback": used_integrity_fallback,
+                "text_integrity": integrity_evidence,
+            }
+        sent = bool(data.get("ok"))
+        return {
+            "ok": sent,
+            "sent": sent,
+            "message": "손상된 원문 대신 안전 경고를 전송했습니다." if used_integrity_fallback else "전송 완료",
+            "telegram": data,
+            "status": status,
+            "delivery_status": "sent_integrity_fallback" if used_integrity_fallback else "sent",
+            "used_integrity_fallback": used_integrity_fallback,
+            "text_integrity": integrity_evidence,
+        }
+
+    def _send_message_legacy(self, text: str) -> dict[str, Any]:
         status = self.status()
         if not status["enabled"]:
             return {"ok": False, "sent": False, "message": "텔레그램이 비활성화되어 있습니다.", "status": status}

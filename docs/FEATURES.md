@@ -155,3 +155,33 @@ The local AI path has a bounded recovery helper for Ollama:
 - deterministic status queries bypass the model entirely when a model response is unnecessary
 
 This improves availability without giving model output authority over operational safety or trading policy.
+
+## 12. Knowledge Curator
+
+The Knowledge Curator keeps accumulated research usable without modifying source ledgers:
+
+- bounded discovery of meetings, reviews, replays, learning, strategy, journal, memory, and evidence sources
+- core-versus-archive scheduling so large historical corpora do not block intraday work
+- immutable provenance with source path, locator, event time, and content hashes
+- JSONL tail indexing and unchanged-source detection
+- private SQLite table and column exclusion
+- SQLite FTS5/BM25 immediate retrieval
+- Qdrant lightweight feature-hash similarity projection
+- on-demand LlamaIndex chunk projection
+- optional Graphiti and GraphRAG experiments kept outside the always-on path
+
+See [KNOWLEDGE_CURATOR.md](KNOWLEDGE_CURATOR.md) for the exact status and limitations.
+
+## 13. Android Mobile Console
+
+The private mobile console provides paired, revocable access to operational views:
+
+- expiring one-time pairing code
+- hashed device tokens and per-device revocation
+- private HTTPS transport
+- system state, work focus, candidates, staff, sub-engines, and incident views
+- read-only assistant commands
+- confirmation-gated emergency stop
+- explicit blocking of direct orders, automation start, credential access, and risk relaxation
+
+See [MOBILE_CONSOLE.md](MOBILE_CONSOLE.md) for architecture and verification evidence.

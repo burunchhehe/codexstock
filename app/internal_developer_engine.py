@@ -37,6 +37,12 @@ class IssueType(str, Enum):
     DB_LOCKED = "DB_LOCKED"
     PROCESS_UNRESPONSIVE = "PROCESS_UNRESPONSIVE"
     DIAGNOSTIC_ENDPOINT_UNAVAILABLE = "DIAGNOSTIC_ENDPOINT_UNAVAILABLE"
+    MARKET_SCAN_STALLED = "MARKET_SCAN_STALLED"
+    CANDIDATE_VALIDATION_STALLED = "CANDIDATE_VALIDATION_STALLED"
+    CANDIDATE_PROMOTION_STALLED = "CANDIDATE_PROMOTION_STALLED"
+    SIGNED_SIGNAL_MISSING = "SIGNED_SIGNAL_MISSING"
+    EXECUTOR_HANDOFF_FAILED = "EXECUTOR_HANDOFF_FAILED"
+    LEGACY_APPROVAL_GATE_ACTIVE = "LEGACY_APPROVAL_GATE_ACTIVE"
     UNKNOWN = "UNKNOWN"
 
 
@@ -199,6 +205,31 @@ def classify_issues(
     declared_classification = str(
         _dig(observation, "classification", "issue_code") or ""
     ).strip().upper()
+    pipeline_issue_types = {
+        item.value: item
+        for item in (
+            IssueType.MARKET_SCAN_STALLED,
+            IssueType.CANDIDATE_VALIDATION_STALLED,
+            IssueType.CANDIDATE_PROMOTION_STALLED,
+            IssueType.SIGNED_SIGNAL_MISSING,
+            IssueType.EXECUTOR_HANDOFF_FAILED,
+            IssueType.LEGACY_APPROVAL_GATE_ACTIVE,
+        )
+    }
+    if declared_classification in pipeline_issue_types:
+        results.append(
+            IssueClassification(
+                pipeline_issue_types[declared_classification],
+                "high",
+                False,
+                "The trading workflow stopped before completing its expected handoff.",
+                {
+                    "trading_pipeline_healthy": False,
+                    "pipeline_state": _dig(observation, "pipeline_state", "trading_pipeline.state"),
+                    "stage_counts": _dig(observation, "stage_counts", "trading_pipeline.stage_counts") or {},
+                },
+            )
+        )
     if declared_classification == IssueType.DIAGNOSTIC_ENDPOINT_UNAVAILABLE.value:
         http_error = observation.get("http_error")
         error_type = (
@@ -338,7 +369,7 @@ def classify_issues(
                 IssueType.HEARTBEAT_MISSING,
                 "high",
                 True,
-                "The main heartbeat exceeded its allowed age.",
+                "The main heartbeat is missing or exceeded its allowed age.",
                 {
                     "heartbeat_age_seconds": heartbeat_age,
                     "heartbeat_timeout_seconds": heartbeat_timeout,
@@ -543,10 +574,39 @@ class InternalDeveloperEngine:
             busy_stall_timeout_seconds=self.busy_stall_timeout_seconds,
         )
         actions = self.recommend_actions(observation, issues)
+        primary_code = issues[0].code.value
+        component_by_issue = {
+            IssueType.LEGACY_APPROVAL_GATE_ACTIVE.value: "approval_mode_contract",
+            IssueType.MARKET_SCAN_STALLED.value: "trading_pipeline",
+            IssueType.CANDIDATE_VALIDATION_STALLED.value: "trading_pipeline",
+            IssueType.CANDIDATE_PROMOTION_STALLED.value: "trading_pipeline",
+            IssueType.SIGNED_SIGNAL_MISSING.value: "trading_pipeline",
+            IssueType.EXECUTOR_HANDOFF_FAILED.value: "trading_pipeline",
+            IssueType.CACHE_INVALID.value: "feature_health_cache",
+        }
+        if primary_code == IssueType.LEGACY_APPROVAL_GATE_ACTIVE.value:
+            root_cause = (
+                "A delegated-auto candidate carried a legacy approval token even though the "
+                "ticket-to-signed-signal-to-executor-result handoff completed."
+            )
+        else:
+            root_cause = str(
+                issues[0].summary
+                or "Deterministic diagnosis identified an operational contract failure."
+            )
+        next_action = (
+            "Verify the execution-mode contract and ticket-to-signal-to-result parity without submitting an order."
+            if primary_code == IssueType.LEGACY_APPROVAL_GATE_ACTIVE.value
+            else "Run the allowlisted recovery once, then verify the same component before closing the incident."
+        )
         return {
             "schema_version": "codexstock.internal-developer.diagnostic.v1",
             "observed_at_epoch": self._clock(),
-            "primary_issue": issues[0].code.value,
+            "primary_issue": primary_code,
+            "component": component_by_issue.get(primary_code, "internal_developer"),
+            "summary": root_cause,
+            "root_cause": root_cause,
+            "next_action": next_action,
             "issues": [issue.to_dict() for issue in issues],
             "recommended_actions": actions,
             "auto_recovery_available": bool(actions)
@@ -566,6 +626,7 @@ class InternalDeveloperEngine:
             heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
             busy_stall_timeout_seconds=self.busy_stall_timeout_seconds,
         ))
+        primary_code = classified[0].code if classified else IssueType.UNKNOWN
         proposals: list[dict[str, object]] = []
         seen: set[str] = set()
 
@@ -581,6 +642,10 @@ class InternalDeveloperEngine:
 
         for issue in classified:
             if issue.code is IssueType.CACHE_INVALID:
+                # A cache symptom attached to a higher-priority pipeline issue
+                # is diagnosed separately; never clear it every service cycle.
+                if primary_code is not IssueType.CACHE_INVALID:
+                    continue
                 target = _dig(observation, "cache_id", "cache.id", "cache.cache_id")
                 if isinstance(target, str):
                     add(ActionType.CLEAR_NAMED_CACHE, {"cache_id": target})
@@ -924,6 +989,9 @@ class InternalDeveloperEngine:
 
         attempted = bool(results)
         all_succeeded = attempted and all(row.get("status") in {"succeeded", "idempotent_replay"} for row in results)
+        report_only = attempted and all(
+            row.get("action") == ActionType.WRITE_INCIDENT_REPORT.value for row in results
+        )
         requested_restart = any(
             row.get("action") == ActionType.REQUEST_CODEXSTOCK_RESTART.value
             and row.get("status") in {"succeeded", "idempotent_replay"}
@@ -939,6 +1007,16 @@ class InternalDeveloperEngine:
         elif primary is IssueType.BUSY_STALLED:
             final_state = "NEEDS_EXTERNAL_ADVICE"
             status = "busy_stalled_reported"
+        elif report_only and primary in {
+            IssueType.MARKET_SCAN_STALLED,
+            IssueType.CANDIDATE_VALIDATION_STALLED,
+            IssueType.CANDIDATE_PROMOTION_STALLED,
+            IssueType.SIGNED_SIGNAL_MISSING,
+            IssueType.EXECUTOR_HANDOFF_FAILED,
+            IssueType.LEGACY_APPROVAL_GATE_ACTIVE,
+        }:
+            final_state = "NEEDS_CODE_FIX"
+            status = "needs_code_fix"
         elif all_succeeded and not only_diagnosed_lock and primary is not IssueType.UNKNOWN:
             final_state = "RECOVERED_UNREVIEWED"
             status = "recovered"

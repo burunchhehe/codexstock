@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,8 +34,73 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         payload = stock_suite_app.build_external_engine_dashboard()
         rows = [row for row in payload["engines"] if row.get("engine_id") == "codexstock-research-forge"]
         self.assertEqual(len(rows), 1)
-        self.assertTrue(rows[0]["connected"])
+        self.assertTrue(rows[0]["adapter_ready"])
+        self.assertTrue(rows[0]["round_trip_verified"])
+        self.assertTrue(rows[0]["formal_connected"])
+        self.assertEqual("normal", rows[0]["operational_state"])
+        self.assertEqual("codexstock_integration_audit", rows[0]["connection_proof_type"])
+        self.assertFalse(rows[0]["recheck_due"])
+        self.assertFalse(rows[0]["live_order_allowed"])
         self.assertIn("실전 주문 권한 없음", rows[0]["safety"])
+
+    def test_research_forge_integration_audit_refreshes_on_demand_connection_proof(self) -> None:
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        evidence = stock_suite_app._external_engine_formal_connection_evidence(
+            {
+                "engine_id": "codexstock-research-forge",
+                "status": "ready",
+                "connected": True,
+                "heavy_compute_policy": "on_demand_only",
+                "runtime": {
+                    "integration_audit": {
+                        "ok": True,
+                        "status": "integrated",
+                        "generated_at": now,
+                    },
+                },
+            },
+            forge_jobs=[],
+            scout_poller={},
+            scout_inbox={},
+            kis_gateway={},
+        )
+
+        self.assertTrue(evidence["round_trip_verified"])
+        self.assertTrue(evidence["success_evidence_fresh"])
+        self.assertTrue(evidence["formal_connected"])
+        self.assertFalse(evidence["recheck_due"])
+        self.assertEqual("formal_connected", evidence["connection_stage"])
+        self.assertEqual(
+            "codexstock_integration_audit",
+            evidence["connection_proof_type"],
+        )
+
+    def test_external_engine_dashboard_contains_knowledge_curator(self) -> None:
+        payload = stock_suite_app._build_external_engine_dashboard_uncached()
+        rows = [row for row in payload["engines"] if row.get("engine_id") == "knowledge-curator"]
+        self.assertEqual(1, len(rows))
+        self.assertTrue(rows[0]["connected"])
+        self.assertTrue(rows[0]["round_trip_verified"])
+        self.assertFalse(rows[0]["live_order_allowed"])
+        self.assertEqual(10, payload["summary"]["engine_count"])
+
+    def test_operating_focus_status_exposes_real_priority_percentages(self) -> None:
+        focus = {
+            "mode": "MARKET_EXECUTION_FOCUS",
+            "market_open": True,
+            "market_phase": "regular",
+            "market_priority_active": True,
+            "trading_focus_pct": 100,
+            "research_focus_pct": 0,
+            "heavy_research_allowed": False,
+            "large_batch_jobs_allowed": False,
+        }
+        with patch.object(stock_suite_app, "build_operating_focus", return_value=focus):
+            payload = stock_suite_app.build_operating_focus_status()
+        self.assertEqual("매매 집중", payload["label"])
+        self.assertEqual(100, payload["trading_focus_pct"])
+        self.assertEqual(0, payload["research_focus_pct"])
+        self.assertTrue(payload["focus_verified"])
 
     def test_external_engine_dashboard_force_bypasses_short_cache(self) -> None:
         fresh = {"ok": True, "schema": "fresh-external-engine-dashboard"}
@@ -78,7 +143,25 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
                 },
                 "execution_account_independent": True,
             },
-            "engines": [{"engine_id": "vectorbt", "live_order_allowed": False}],
+            "engines": [{
+                "engine_id": "vectorbt",
+                "live_order_allowed": False,
+                "runtime_connected": True,
+                "formal_connected": True,
+                "connection_truth": {
+                    "runtime_connected": True,
+                    "round_trip_verified": True,
+                    "proof_fresh": True,
+                    "current_usable": True,
+                    "formal_connected": True,
+                },
+                "success_evidence_ttl_seconds": 172800,
+                "success_evidence_fresh": True,
+                "recheck_due": False,
+                "lightweight_recheck_at": datetime.now().astimezone().isoformat(),
+                "lightweight_recheck_passed": True,
+                "heavy_round_trip_recheck_started": False,
+            }],
             "on_demand_audit": {"live_order_allowed": False},
             "sequential_execution_contract": {
                 "mode": "one_heavy_engine_at_a_time",
@@ -94,11 +177,33 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         )
 
     def test_external_engine_dashboard_cache_accepts_only_current_safe_runtime_tree(self) -> None:
+        if not stock_suite_app._external_engine_runtime_scope().get(
+            "execution_account_independent"
+        ):
+            self.skipTest("private runtime-root contract is not included in the public repository")
         payload = {
             "ok": True,
             "schema": "codexstock_external_engine_dashboard_v1",
             "runtime_scope": stock_suite_app._external_engine_runtime_scope(),
-            "engines": [{"engine_id": "vectorbt", "live_order_allowed": False}],
+            "engines": [{
+                "engine_id": "vectorbt",
+                "live_order_allowed": False,
+                "runtime_connected": True,
+                "formal_connected": True,
+                "connection_truth": {
+                    "runtime_connected": True,
+                    "round_trip_verified": True,
+                    "proof_fresh": True,
+                    "current_usable": True,
+                    "formal_connected": True,
+                },
+                "success_evidence_ttl_seconds": 172800,
+                "success_evidence_fresh": True,
+                "recheck_due": False,
+                "lightweight_recheck_at": datetime.now().astimezone().isoformat(),
+                "lightweight_recheck_passed": True,
+                "heavy_round_trip_recheck_started": False,
+            }],
             "on_demand_audit": {"live_order_allowed": False},
             "sequential_execution_contract": {
                 "mode": "one_heavy_engine_at_a_time",
@@ -127,12 +232,16 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         )
 
     def test_external_engine_dashboard_verifies_on_demand_heavy_compute(self) -> None:
+        if not stock_suite_app._external_engine_runtime_scope().get(
+            "execution_account_independent"
+        ):
+            self.skipTest("private runtime-root contract is not included in the public repository")
         payload = stock_suite_app._build_external_engine_dashboard_uncached()
         audit = payload["on_demand_audit"]
 
         self.assertTrue(audit["ok"])
         self.assertEqual("passed", audit["status"])
-        self.assertEqual(9, audit["verified_engine_count"])
+        self.assertEqual(10, audit["verified_engine_count"])
         self.assertEqual(6, audit["spawn_on_demand_engine_count"])
         self.assertEqual(0, audit["persistent_heavy_engine_count"])
         self.assertFalse(audit["live_order_allowed"])
@@ -150,7 +259,23 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
             all(row.get("last_checked_at") for row in payload["engines"])
         )
         self.assertTrue(
-            all(row.get("last_success_at") for row in payload["engines"] if row.get("connected"))
+            all(
+                row.get("last_success_at")
+                for row in payload["engines"]
+                if row.get("formal_connected")
+            )
+        )
+        self.assertEqual(
+            sum(1 for row in payload["engines"] if row.get("runtime_connected")),
+            payload["summary"]["connected_count"],
+        )
+        self.assertEqual(
+            sum(1 for row in payload["engines"] if row.get("formal_connected")),
+            payload["summary"]["formal_connected_count"],
+        )
+        self.assertGreaterEqual(
+            payload["summary"]["connected_count"],
+            payload["summary"]["formal_connected_count"],
         )
         self.assertTrue(payload["snapshot_id"].startswith("ops-"))
         self.assertTrue(
@@ -253,6 +378,35 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         self.assertTrue(gate["heavy_work_allowed"])
         self.assertFalse(gate["live_order_allowed"])
 
+    def test_storage_runtime_stability_gate_accepts_large_healthy_sqlite(self) -> None:
+        engine_dashboard = {
+            "on_demand_audit": {
+                "schema": "codexstock_external_engine_on_demand_audit_v1",
+                "status": "passed",
+                "active_heavy_job_count": 0,
+                "persistent_heavy_engine_count": 0,
+                "max_concurrent_external_jobs": 1,
+            }
+        }
+        sqlite_audit = {
+            "ok": True,
+            "status": "ready_large_healthy",
+            "summary": {
+                "problem_sqlite_count": 0,
+                "maintenance_advisory_count": 1,
+                "max_query_ms": 8.5,
+            },
+        }
+
+        gate = stock_suite_app.build_storage_runtime_stability_gate(
+            engine_dashboard=engine_dashboard,
+            sqlite_audit=sqlite_audit,
+        )
+
+        self.assertTrue(gate["ok"])
+        self.assertNotIn("sqlite_storage_not_ready", gate["blockers"])
+        self.assertTrue(gate["heavy_work_allowed"])
+
     def test_storage_runtime_stability_gate_blocks_slow_sqlite_or_resident_heavy_engine(self) -> None:
         engine_dashboard = {
             "on_demand_audit": {
@@ -323,11 +477,12 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         ):
             payload = stock_suite_app._build_external_engine_dashboard_uncached()
         scout = next(row for row in payload["engines"] if row.get("engine_id") == "external-info-scout")
-        self.assertFalse(scout["connected"])
+        self.assertTrue(scout["connected"])
+        self.assertTrue(scout["runtime_connected"])
         self.assertTrue(scout["adapter_ready"])
         self.assertTrue(scout["round_trip_verified"])
         self.assertFalse(scout["formal_connected"])
-        self.assertEqual("round_trip_proven_currently_degraded", scout["connection_stage"])
+        self.assertEqual("round_trip_proven_evidence_stale", scout["connection_stage"])
         self.assertEqual("warning", scout["status"])
         self.assertFalse(scout["last_attempt_failed"])
         self.assertEqual("delayed", scout["operational_state"])
@@ -360,7 +515,7 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
                 "runtime": {
                     "last_run": {
                         "ok": True,
-                        "finished_at_epoch": 1_720_000_000,
+                        "finished_at_epoch": datetime.now().timestamp(),
                         "snapshot_id": "snapshot-1",
                     }
                 },
@@ -388,6 +543,8 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         )
 
         self.assertTrue(pending["adapter_ready"])
+        self.assertTrue(pending["connected"])
+        self.assertTrue(pending["runtime_connected"])
         self.assertFalse(pending["round_trip_verified"])
         self.assertFalse(pending["formal_connected"])
         self.assertTrue(proven["round_trip_verified"])
@@ -396,6 +553,37 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         self.assertTrue(failed["last_attempt_failed"])
         self.assertEqual(["vectorbt"], failed["failed_components"])
         self.assertEqual("round_trip_failed", failed["connection_stage"])
+
+    def test_external_engine_stale_success_requires_bounded_recheck(self) -> None:
+        stale_epoch = (datetime.now().astimezone() - timedelta(days=3)).timestamp()
+        evidence = stock_suite_app._external_engine_formal_connection_evidence(
+            {
+                "engine_id": "vectorbt",
+                "engine_name": "vectorbt",
+                "status": "ready",
+                "connected": True,
+                "heavy_compute_policy": "on_demand_only",
+                "runtime": {
+                    "engine_name": "vectorbt",
+                    "last_run": {"ok": True, "finished_at_epoch": stale_epoch},
+                },
+            },
+            forge_jobs=[],
+            scout_poller={},
+            scout_inbox={},
+            kis_gateway={},
+        )
+
+        self.assertTrue(evidence["round_trip_verified"])
+        self.assertTrue(evidence["connected"])
+        self.assertTrue(evidence["runtime_connected"])
+        self.assertFalse(evidence["success_evidence_fresh"])
+        self.assertFalse(evidence["formal_connected"])
+        self.assertEqual("round_trip_proven_evidence_stale", evidence["connection_stage"])
+        self.assertTrue(evidence["recheck_due"])
+        self.assertTrue(evidence["lightweight_recheck_passed"])
+        self.assertFalse(evidence["heavy_round_trip_recheck_started"])
+        self.assertEqual(48 * 60 * 60, evidence["success_evidence_ttl_seconds"])
 
     def test_external_engine_diagnosis_distinguishes_order_gateway_from_research_delay(self) -> None:
         kis = stock_suite_app._external_engine_operational_diagnosis(
@@ -480,7 +668,7 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
                 "state": {
                     "cycle_id": "cycle-verified",
                     "status": "COMPLETED",
-                    "finished_at": "2026-07-17T15:11:13+09:00",
+                    "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                     "engine_results": [
                         {
                             "engine_id": "openbb",
@@ -545,7 +733,7 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         self.assertTrue(evidence["improvement_proof_superseded_by_newer_failure"])
         self.assertEqual("NEWER_FAILURE_INVALIDATED_PROOF", evidence["evidence_freshness_status"])
 
-    def test_old_on_demand_success_is_standby_not_latency_delay(self) -> None:
+    def test_old_on_demand_success_requires_reverification(self) -> None:
         evidence = stock_suite_app._external_engine_formal_connection_evidence(
             {
                 "engine_id": "vectorbt",
@@ -565,24 +753,26 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
             kis_gateway={},
         )
 
-        self.assertTrue(evidence["formal_connected"])
-        self.assertEqual("formal_connected", evidence["connection_stage"])
+        self.assertFalse(evidence["formal_connected"])
+        self.assertEqual("round_trip_proven_evidence_stale", evidence["connection_stage"])
         self.assertGreater(evidence["evidence_age_seconds"], 0)
         self.assertEqual(
-            "ON_DEMAND_PROOF_VALID_UNTIL_NEWER_ATTEMPT",
+            "ROUND_TRIP_PROOF_STALE_RECHECK_DUE",
             evidence["evidence_freshness_status"],
         )
+        self.assertTrue(evidence["recheck_due"])
 
     def test_research_bundle_requires_all_four_subengines(self) -> None:
+        now_epoch = datetime.now().timestamp()
         partial_runs = {
-            "Backtrader": {"ok": True, "finished_at_epoch": 1_720_000_001},
-            "Freqtrade": {"ok": True, "finished_at_epoch": 1_720_000_002},
-            "vn.py": {"ok": True, "finished_at_epoch": 1_720_000_003},
+            "Backtrader": {"ok": True, "finished_at_epoch": now_epoch - 3},
+            "Freqtrade": {"ok": True, "finished_at_epoch": now_epoch - 2},
+            "vn.py": {"ok": True, "finished_at_epoch": now_epoch - 1},
             "FinRL": {},
         }
         complete_runs = {
             **partial_runs,
-            "FinRL": {"ok": True, "finished_at_epoch": 1_720_000_004},
+            "FinRL": {"ok": True, "finished_at_epoch": now_epoch},
         }
 
         def evidence(runs):
@@ -612,10 +802,29 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
     def test_mcp_exposes_all_research_forge_tools_without_live_scope(self) -> None:
         from app import codexstock_mcp_server
 
-        self.assertEqual(83, len(codexstock_mcp_server.RESEARCH_TOOL_NAMES))
+        self.assertEqual(94, len(codexstock_mcp_server.RESEARCH_TOOL_NAMES))
         tool_names = {str(row.get("name")) for row in codexstock_mcp_server.TOOLS}
         self.assertTrue(set(codexstock_mcp_server.RESEARCH_TOOL_NAMES).issubset(tool_names))
+        self.assertIn("codexstock_research_forge_integration_audit", tool_names)
         self.assertFalse(any("live_order" in name for name in codexstock_mcp_server.RESEARCH_TOOL_NAMES))
+
+    def test_research_forge_integration_audit_proves_capability_consumption(self) -> None:
+        payload = stock_suite_app.build_research_forge_integration_audit()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual("integrated", payload["status"])
+        self.assertEqual(payload["capability_count"], payload["recognized_capability_count"])
+        self.assertEqual(payload["gateway_tool_count"], payload["manifest_tool_count"])
+        self.assertEqual(
+            payload["gateway_tool_count"],
+            payload["mcp_exposed_research_tool_count"],
+        )
+        self.assertEqual([], payload["blockers"])
+        self.assertTrue(payload["paper_only"])
+        self.assertFalse(payload["live_order_allowed"])
+        capability_ids = {row["id"] for row in payload["capabilities"]}
+        self.assertIn("instrument_contracts", capability_ids)
+        self.assertIn("paper_candidate_handoff", capability_ids)
 
     def test_legacy_tree_migration_is_non_destructive_and_one_time(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
