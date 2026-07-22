@@ -1,8 +1,12 @@
-# Public Release Notes
+# Public Technical Evaluation Snapshot
 
 This release is intended for public technical review of CodexStock's architecture,
 workflow, safety model, and research direction without publishing the owner's private
 runtime.
+
+Public visibility is provided only to collect reactions, technical review, and feedback.
+It does not grant permission to use, copy, modify, redistribute, deploy, sell, or build
+a service from the source. CodexStock is not open-source software. See `LICENSE`.
 
 Project creator and maintainer: **Jinwoo Kim** (`burunchhehe`).
 

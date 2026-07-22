@@ -6,6 +6,10 @@ It combines market monitoring, candidate discovery, strategy research, paper/liv
 
 Created and maintained by **Jinwoo Kim** (`burunchhehe`).
 
+> **Evaluation only. All rights reserved.** This repository is public so people and developers can inspect CodexStock and provide feedback. It is **not open source** and does not grant permission to use, copy, modify, redistribute, deploy, sell, or build a service from the code. Prior written permission from the owner is required. See [LICENSE](LICENSE).
+
+> **평가·피드백 열람 전용입니다.** 사람들이 코덱스스톡의 기능과 설계를 살펴보고 의견을 남길 수 있도록 공개한 저장소이며 오픈소스가 아닙니다. 소유자의 사전 서면 허가 없이 사용·복제·수정·재배포·서비스 운영·판매할 수 없습니다.
+
 ## 2026-07-22 지식 큐레이터·안드로이드 앱 업데이트
 
 오늘 오전에는 누적되는 회의·연구·복기·후보 판단을 정리하고 다시 찾아주는 **지식 큐레이터**를 만들었고, 저녁에는 집 PC의 코덱스스톡을 개인 안드로이드 기기에서 확인하는 **모바일 콘솔**을 실제로 연결했습니다.

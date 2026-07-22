@@ -7,7 +7,7 @@
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        "& (Join-Path $env:USERPROFILE 'Documents\\Codex\\2026-07-01\\new-chat\\outputs\\stock-open-source-suite\\run_mcp_server.ps1')"
+        "& (Join-Path $env:USERPROFILE 'CodexStock\\run_mcp_server.ps1')"
       ],
       "env": {
         "CODEXSTOCK_BASE_URL": "http://127.0.0.1:8765"

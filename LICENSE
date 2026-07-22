@@ -1,24 +1,24 @@
-MIT License
+CodexStock Evaluation-Only License
 
-Copyright (c) 2026 Jinwoo Kim
+Copyright (c) 2026 Jinwoo Kim. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This repository is made publicly viewable only for technical review,
+demonstration, and feedback. It is not open-source software and no permission
+is granted to use, execute, copy, modify, merge, publish, distribute,
+sublicense, sell, host, deploy, create derivative works from, train an AI model
+with, or provide a product or service based on this software or its
+documentation.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Any use beyond viewing the repository for evaluation requires prior written
+permission from the copyright owner. The limited rights required by the
+hosting platform to store and display this public repository are unaffected.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Third-party projects, engines, libraries, and data providers retain their own
+licenses and terms. This notice does not claim ownership of or restrict rights
+already granted by those third parties.
 
-Third-party projects, engines, data providers, and optional integrations retain
-their original licenses and terms.
+THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT
+OWNER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE
+MATERIALS OR THEIR REVIEW.

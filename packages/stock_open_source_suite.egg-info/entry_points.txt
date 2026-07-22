@@ -1,3 +1,0 @@
-[console_scripts]
-codexstock-research-forge = codexstock_research_forge.cli:main
-stock-suite = stock_suite.cli:main
