@@ -8,6 +8,28 @@ Created and maintained by **Jinwoo Kim** (`burunchhehe`).
 
 > **Evaluation only. All rights reserved.** This repository is public so people and developers can inspect CodexStock and provide feedback. It is **not open source** and does not grant permission to use, copy, modify, redistribute, deploy, sell, or build a service from the code. Prior written permission from the owner is required. See [LICENSE](LICENSE).
 
+## 2026-07-25 Evidence-Aware Operations and Self-Repair Upgrade
+
+![CodexStock internal developer recovery dashboard](docs/images/internal-developer-recovery-2026-07-25.png)
+
+The latest build strengthens CodexStock as an evidence-aware operating system rather
+than simply adding more functions.
+
+- evidence-backed AI staff status with freshness and last-success timestamps
+- knowledge curation across documents, vectors, graph projections, and retrieval evidence
+- deterministic external execution sidecar separated from generative AI decisions
+- technical audit, sub-engine audit, and end-to-end trading-pipeline monitoring
+- seven-stage internal-developer recovery workflow with Git-isolated Aider/Qwen repair
+- Gemma review, bounded tests, protected-file checks, and GPT escalation boundaries
+- Android private operations console with paired-device access and emergency stop
+- shared-cycle SLA accounting and non-terminal warning suppression to prevent repair storms
+- `1,303` automated regression tests passed after the latest repair-stability update
+
+The screenshot shows the internal developer completing recovery verification while
+keeping production-order authority outside the coding repair path. Read the
+implementation-oriented evidence note in
+[`docs/VERIFIED_UPGRADE_2026-07-25.md`](docs/VERIFIED_UPGRADE_2026-07-25.md).
+
 > **평가·피드백 열람 전용입니다.** 사람들이 코덱스스톡의 기능과 설계를 살펴보고 의견을 남길 수 있도록 공개한 저장소이며 오픈소스가 아닙니다. 소유자의 사전 서면 허가 없이 사용·복제·수정·재배포·서비스 운영·판매할 수 없습니다.
 
 ## 2026-07-22 지식 큐레이터·안드로이드 앱 업데이트
