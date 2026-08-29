@@ -5,6 +5,18 @@ from __future__ import annotations
 import json
 from datetime import datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+MARKET_TIMEZONE = ZoneInfo("Asia/Seoul")
+
+
+def _market_time(value: datetime) -> datetime:
+    return (
+        value.replace(tzinfo=MARKET_TIMEZONE)
+        if value.tzinfo is None
+        else value.astimezone(MARKET_TIMEZONE)
+    )
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -12,7 +24,7 @@ def _parse_time(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(str(value or ""))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.astimezone()
+    return _market_time(parsed)
 
 
 def _tail_jsonl(path: Path, max_bytes: int = 2_000_000) -> list[dict[str, object]]:
@@ -45,7 +57,7 @@ def _latest_time(row: dict[str, object]) -> datetime | None:
 
 
 def _is_regular_market_session(now: datetime) -> bool:
-    local = now.astimezone()
+    local = _market_time(now)
     return local.weekday() < 5 and time(9, 0) <= local.time().replace(tzinfo=None) <= time(15, 30)
 
 
@@ -58,7 +70,10 @@ def _count_json_files(path: Path | None, *, today: object | None = None) -> int:
     count = 0
     for item in files:
         try:
-            modified = datetime.fromtimestamp(item.stat().st_mtime).astimezone().date()
+            modified = datetime.fromtimestamp(
+                item.stat().st_mtime,
+                tz=MARKET_TIMEZONE,
+            ).date()
         except OSError:
             continue
         if modified == today:
@@ -73,7 +88,10 @@ def _json_file_ids(path: Path | None, *, today: object | None = None) -> set[str
     for item in Path(path).glob("*.json"):
         if today is not None:
             try:
-                modified = datetime.fromtimestamp(item.stat().st_mtime).astimezone().date()
+                modified = datetime.fromtimestamp(
+                    item.stat().st_mtime,
+                    tz=MARKET_TIMEZONE,
+                ).date()
             except OSError:
                 continue
             if modified != today:
@@ -89,7 +107,10 @@ def _json_documents(path: Path | None, *, today: object | None = None) -> dict[s
     for item in Path(path).glob("*.json"):
         if today is not None:
             try:
-                modified = datetime.fromtimestamp(item.stat().st_mtime).astimezone().date()
+                modified = datetime.fromtimestamp(
+                    item.stat().st_mtime,
+                    tz=MARKET_TIMEZONE,
+                ).date()
             except OSError:
                 continue
             if modified != today:
@@ -137,7 +158,9 @@ def _latest_matching_file_time(path: Path | None, identifiers: set[str]) -> date
     for identifier in identifiers:
         item = Path(path) / f"{identifier}.json"
         try:
-            observed.append(datetime.fromtimestamp(item.stat().st_mtime).astimezone())
+            observed.append(
+                datetime.fromtimestamp(item.stat().st_mtime, tz=MARKET_TIMEZONE)
+            )
         except OSError:
             continue
     return max(observed, default=None)
@@ -151,7 +174,7 @@ def _continuous_validation_pending_since(
     pending_since: dict[str, datetime] = {}
     for row_index, row in enumerate(rows):
         observed_at = _latest_time(row)
-        if observed_at is None or observed_at.astimezone().date() != today:
+        if observed_at is None or _market_time(observed_at).date() != today:
             continue
         items = [item for item in (row.get("items") or []) if isinstance(item, dict)]
         current: set[str] = set()
@@ -186,12 +209,15 @@ def audit_candidate_pipeline(
     control_mode: str = "",
     now: datetime | None = None,
 ) -> dict[str, object]:
-    now = now or datetime.now().astimezone()
+    now = _market_time(now or datetime.now(MARKET_TIMEZONE))
     all_tickets = [row for row in _tail_jsonl(Path(ticket_file)) if row.get("mode") == "live_candidate"]
     today = now.date()
     tickets = [
         row for row in all_tickets
-        if (_parse_time(row.get("created_at")) or datetime.min.astimezone()).astimezone().date() == today
+        if _market_time(
+            _parse_time(row.get("created_at"))
+            or datetime.min.replace(tzinfo=MARKET_TIMEZONE)
+        ).date() == today
     ]
     passed = [row for row in tickets if row.get("risk_status") == "PASSED"]
     published = [
@@ -325,14 +351,14 @@ def audit_candidate_pipeline(
         else None
     )
     session_active = _is_regular_market_session(now)
-    local_now = now.astimezone()
+    local_now = _market_time(now)
     session_start = local_now.replace(hour=9, minute=0, second=0, microsecond=0)
     session_elapsed_seconds = max(0.0, (local_now - session_start).total_seconds())
     scan_observed_today = bool(
-        pulse_at and pulse_at.astimezone().date() == local_now.date()
+        pulse_at and _market_time(pulse_at).date() == local_now.date()
     )
     radar_observed_today = bool(
-        radar_at and radar_at.astimezone().date() == local_now.date()
+        radar_at and _market_time(radar_at).date() == local_now.date()
     )
     incidents: list[dict[str, object]] = []
     if failed:

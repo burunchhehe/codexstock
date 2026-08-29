@@ -248,7 +248,9 @@ class AnalyticalStorage:
         for attempt in range(50):
             try:
                 with _CONNECT_LOCK:
-                    return _duckdb().connect(str(self.db_path))
+                    connection = _duckdb().connect(str(self.db_path))
+                    connection.execute("SET TimeZone='Asia/Seoul'")
+                    return connection
             except Exception as exc:
                 last_error = exc
                 message = str(exc).lower()
