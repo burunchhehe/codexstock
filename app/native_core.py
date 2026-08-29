@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Literal
 
+try:
+    from .api_contracts import synthetic_result
+except ImportError:
+    from api_contracts import synthetic_result
+
 
 Side = Literal["BUY", "SELL"]
 SYMBOLS = ("AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "AMD", "NFLX", "SPY", "QQQ", "PLTR")
@@ -534,6 +539,7 @@ class NativeMarket:
             self.opens[symbol] = series[0]
             self.volumes[symbol] = 500_000 + (sum(ord(char) for char in symbol) * 3711)
 
+    @synthetic_result("native_market_tick_generator")
     def tick(self) -> dict[str, object]:
         self.tick_index += 1
         snapshot = []
@@ -564,6 +570,7 @@ class NativeMarket:
             series = generate_prices(symbol, max(bars, 220), seed_offset=1)
         return series[-bars:]
 
+    @synthetic_result("native_market_quote_generator")
     def quote(self, symbol: str) -> dict[str, object]:
         symbol = symbol.upper()
         series = self.history(symbol)
@@ -577,6 +584,7 @@ class NativeMarket:
             "volume": self.volumes.get(symbol, 0),
         }
 
+    @synthetic_result("native_market_orderbook_generator")
     def orderbook(self, symbol: str, levels: int = 5) -> dict[str, object]:
         quote = self.quote(symbol)
         mid = float(quote["price"])
@@ -602,6 +610,7 @@ class NativeBroker:
     max_orders: int = 20
     max_position_pct: float = 0.25
 
+    @synthetic_result("native_paper_broker")
     def submit_market_order(self, symbol: str, side: Side, quantity: float) -> dict[str, object]:
         if quantity <= 0:
             raise ValueError(MSG_QTY)
@@ -648,6 +657,7 @@ class NativeBroker:
         )
         return order
 
+    @synthetic_result("native_paper_broker")
     def portfolio(self) -> dict[str, object]:
         items = []
         market_value = 0.0
@@ -677,6 +687,7 @@ class NativeStrategyRunner:
     market: NativeMarket
     broker: NativeBroker
 
+    @synthetic_result("native_strategy_synthetic_prices")
     def run_once(self, symbol: str, fast: int = 12, slow: int = 32, quantity: float = 10) -> dict[str, object]:
         symbol = symbol.upper()
         prices = self.market.history(symbol, max(120, slow + 5))
@@ -715,6 +726,7 @@ class NativeBacktester:
         dates[-1] = end.isoformat()
         return bars, dates
 
+    @synthetic_result("native_backtester_synthetic_prices")
     def run_ma_cross(self, symbol: str, days: int, fast: int, slow: int) -> dict[str, object]:
         prices = generate_prices(symbol, days, seed_offset=7)
         result = evaluate_ma_cross_prices(prices, fast, slow, self.initial_cash)
@@ -740,6 +752,7 @@ class NativeBacktester:
             "rsi": result["rsi"],
         }
 
+    @synthetic_result("native_backtester_synthetic_prices")
     def run_ma_cross_range(self, symbol: str, start_date: str, end_date: str, fast: int, slow: int) -> dict[str, object]:
         bars, dates = self._bars_from_dates(start_date, end_date)
         prices = generate_prices(symbol, bars, seed_offset=sum(ord(ch) for ch in start_date + end_date))
@@ -772,6 +785,7 @@ class NativeBacktester:
         }
         return payload
 
+    @synthetic_result("native_backtester_synthetic_prices")
     def run_protected_range(self, symbol: str, start_date: str, end_date: str, fast: int, slow: int) -> dict[str, object]:
         bars, dates = self._bars_from_dates(start_date, end_date)
         seed = sum(ord(ch) for ch in f"{symbol}:{start_date}:{end_date}:protected")
@@ -832,6 +846,7 @@ class NativeBacktester:
             "inspired_by": ["Freqtrade Protections", "StoplossGuard", "MaxDrawdown", "LowProfitPairs", "CooldownPeriod"],
         }
 
+    @synthetic_result("native_backtester_synthetic_prices")
     def compare_symbols_range(self, symbols: list[str], start_date: str, end_date: str, fast: int, slow: int) -> dict[str, object]:
         unique_symbols = []
         for symbol in symbols:
@@ -868,6 +883,7 @@ class NativeBacktester:
             "best": ranked[0] if ranked else None,
         }
 
+    @synthetic_result("native_backtester_synthetic_prices")
     def optimize_ma_range(
         self,
         symbol: str,
@@ -1578,6 +1594,7 @@ class NativeBacktester:
             "next_actions": next_actions,
         }
 
+    @synthetic_result("native_backtester_synthetic_prices")
     def robustness_range(
         self,
         symbol: str,
@@ -1692,6 +1709,7 @@ class NativeBacktester:
             "rsi": result["rsi"],
         }
 
+    @synthetic_result("native_backtester_synthetic_prices")
     def compare(self, symbol: str, days: int, fast: int, slow: int) -> dict[str, object]:
         prices = generate_prices(symbol, days, seed_offset=13)
         base = evaluate_ma_cross_prices(prices, 12, 32, self.initial_cash)
@@ -1738,6 +1756,7 @@ class NativeResearchLab:
     journal: NativeJournal
     initial_cash: float = 10_000.0
 
+    @synthetic_result("native_research_synthetic_prices")
     def scan(self, symbol: str, days: int = 260) -> dict[str, object]:
         prices = generate_prices(symbol, days, seed_offset=11)
         split = max(120, int(days * 0.65))

@@ -218,6 +218,9 @@ from native_core import (  # noqa: E402
     evaluate_protected_ma_cross_prices,
     generate_prices,
 )
+from local_api_security import validate_local_api_write  # noqa: E402
+from startup_policy import resolve_startup_policy  # noqa: E402
+from native_api_http import NATIVE_API_GET_PATHS, NATIVE_API_POST_PATHS, handle_native_api_get, handle_native_api_post  # noqa: E402
 from ops_core import HepiOpsCore  # noqa: E402
 from stock_suite.execution_sidecar import process_is_alive  # noqa: E402
 from stock_suite.execution_mode import (  # noqa: E402
@@ -56238,7 +56241,17 @@ def _feature_surface_contract_probe() -> dict[str, object]:
             "button_id": "runBacktest",
         },
     ]
-    app_source = Path(__file__).read_text(encoding="utf-8", errors="replace")
+    route_source_paths = [Path(__file__), *sorted(APP_ROOT.glob("*_http.py"))]
+    app_source = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in route_source_paths
+        if path.is_file()
+    )
+    extracted_route_source = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in route_source_paths[1:]
+        if path.is_file()
+    )
     mcp_path = APP_ROOT / "codexstock_mcp_server.py"
     mcp_source = mcp_path.read_text(encoding="utf-8", errors="replace") if mcp_path.exists() else ""
     index_path = APP_ROOT / "web" / "index.html"
@@ -56312,6 +56325,7 @@ def _feature_surface_contract_probe() -> dict[str, object]:
             ui_api_paths.add(normalized)
 
     exact_routes = set(re.findall(r"parsed\.path\s*==\s*['\"]([^'\"]+)['\"]", app_source))
+    exact_routes.update(re.findall(r"['\"](/api/[^'\"]+)['\"]", extracted_route_source))
     route_sets = re.findall(r"parsed\.path\s+in\s+\{([^}]+)\}", app_source, flags=re.DOTALL)
     for route_set in route_sets:
         exact_routes.update(re.findall(r"['\"]([^'\"]+)['\"]", route_set))
@@ -81599,6 +81613,27 @@ def build_codexstock_maturity_scorecard(record: bool = True) -> dict[str, object
         "operational_maturity_score": operational_maturity_score,
         "performance_evidence_score": performance_evidence_score,
         "combined_readiness_score": combined_readiness_score,
+        "score_scope": {
+            "overall_score": "internal_product_improvement_only",
+            "architecture_score": "technical_implementation_health_only",
+            "operational_maturity_score": "product_operations_process_only",
+            "performance_evidence_score": "verified_investment_evidence_only",
+            "release_readiness_score": release_score,
+            "not_investment_advice": True,
+            "message": "내부 개발·운영 점수는 투자 수익성이나 실계좌 운용 가능 점수가 아닙니다.",
+        },
+        "release_readiness": {
+            "ready": bool(release_readiness.get("ready")),
+            "score": release_score,
+            "blockers": release_blockers,
+            "warnings": release_warnings,
+        },
+        "live_trading_readiness": {
+            "ready": bool(official_performance_claim_allowed and live_reconciliation_ready),
+            "score": performance_evidence_score,
+            "official_performance_claim_allowed": official_performance_claim_allowed,
+            "blockers": official_performance_blockers,
+        },
         "evaluation_axes": [
             {
                 "id": "architecture",
@@ -91189,6 +91224,10 @@ class StockSuiteHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*")
         if urlparse(self.path).path.startswith("/api/mobile/"):
             origin = self.headers.get("Origin", "")
             if mobile_cors_origin_allowed(origin):
@@ -91210,6 +91249,12 @@ class StockSuiteHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in NATIVE_API_GET_PATHS:
+            handled = handle_native_api_get(parsed.path, logic_book=LOGIC_BOOK)
+            if handled is not None:
+                result, status = handled
+                json_response(self, result, status=status)
+                return
         deferred = _market_priority_deferred_request("GET", parsed.path)
         if deferred is not None:
             json_response(self, deferred, status=423)
@@ -91948,10 +91993,6 @@ class StockSuiteHandler(SimpleHTTPRequestHandler):
                     "safety": "옵시디언 기억은 paper 리허설 복기 기록입니다. 실거래 주문 지시가 아닙니다.",
                 },
             )
-            return
-
-        if parsed.path == "/api/logic":
-            json_response(self, {"slots": LOGIC_BOOK.list()})
             return
 
         if parsed.path == "/api/runtime/deployment-freshness":
@@ -94144,12 +94185,23 @@ class StockSuiteHandler(SimpleHTTPRequestHandler):
         ):
             json_response(self, {"error": "payload_size_not_allowed", "max_bytes": EXTERNAL_SIGNAL_MAX_BYTES}, status=413)
             return
+        rejection = validate_local_api_write(parsed.path, self.headers, body_length=length)
+        if rejection is not None:
+            json_response(self, rejection.as_payload(), status=rejection.status)
+            return
         body = self.rfile.read(length).decode("utf-8") if length else "{}"
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
             json_response(self, {"error": MSG_JSON}, status=400)
             return
+
+        if parsed.path in NATIVE_API_POST_PATHS:
+            handled = handle_native_api_post(parsed.path, payload if isinstance(payload, dict) else {}, strategy=STRATEGY, research=RESEARCH, logic_book=LOGIC_BOOK, journal_add=JOURNAL.add)
+            if handled is not None:
+                result, status = handled
+                json_response(self, result, status=status)
+                return
 
         if parsed.path == "/api/mobile/pair":
             if not isinstance(payload, dict):
@@ -95541,26 +95593,6 @@ class StockSuiteHandler(SimpleHTTPRequestHandler):
             json_response(self, TELEGRAM_DISPATCHER.stop())
             return
 
-        if parsed.path == "/api/strategy/run":
-            try:
-                result = STRATEGY.run_once(
-                    symbol=str(payload.get("symbol", "AAPL")),
-                    fast=int(payload.get("fast", 12)),
-                    slow=int(payload.get("slow", 32)),
-                    quantity=float(payload.get("quantity", 10)),
-                )
-            except ValueError as exc:
-                json_response(self, {"error": str(exc)}, status=400)
-                return
-            json_response(self, result)
-            return
-
-        if parsed.path == "/api/research/run":
-            symbol = str(payload.get("symbol", "AAPL"))
-            days = int(payload.get("days", 260))
-            json_response(self, RESEARCH.scan(symbol=symbol, days=days))
-            return
-
         if parsed.path == "/api/strategy/from-text":
             symbol = str(payload.get("symbol", "AAPL"))
             start_date = str(payload.get("start", "2016-01-01"))
@@ -95841,38 +95873,12 @@ class StockSuiteHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        if parsed.path == "/api/logic/save":
-            try:
-                result = LOGIC_BOOK.save(
-                    name=str(payload.get("name", "나의전략")),
-                    fast=int(payload.get("fast", 12)),
-                    slow=int(payload.get("slow", 32)),
-                    memo=str(payload.get("memo", "")),
-                    locked=bool(payload.get("locked", False)),
-                )
-            except ValueError as exc:
-                json_response(self, {"error": str(exc)}, status=400)
-                return
-            JOURNAL.add("LOGIC", f"{result['name']} 로직 저장", result)
-            json_response(self, {"slot": result, "slots": LOGIC_BOOK.list()})
-            return
-
-        if parsed.path == "/api/logic/lock":
-            try:
-                result = LOGIC_BOOK.lock(name=str(payload.get("name", "기준전략")), locked=bool(payload.get("locked", True)))
-            except ValueError as exc:
-                json_response(self, {"error": str(exc)}, status=400)
-                return
-            JOURNAL.add("LOGIC", f"{result['name']} 잠금 상태 변경", result)
-            json_response(self, {"slot": result, "slots": LOGIC_BOOK.list()})
-            return
-
         json_response(self, {"error": MSG_NOT_FOUND}, status=404)
 
 
 def _always_on_research_enabled() -> bool:
-    """Keep read-only research/Paper workers alive unless explicitly disabled by environment."""
-    value = str(os.environ.get("CODEXSTOCK_ALWAYS_ON_RESEARCH", "1") or "1").strip().lower()
+    """Clean installs stay quiet; explicit saved state is resolved in main()."""
+    value = str(os.environ.get("CODEXSTOCK_ALWAYS_ON_RESEARCH", "0") or "0").strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 
@@ -95978,7 +95984,16 @@ def main(argv: list[str] | None = None) -> int:
             f"runtime={startup_execution_mode.get('runtime_conflicts')}"
         )
     saved_daemon = AI_DAEMON.load_state()
-    always_on_research = _always_on_research_enabled()
+    research_startup_policy = resolve_startup_policy(
+        os.environ,
+        saved_research_enabled=bool(saved_daemon.get("enabled")),
+    )
+    print(
+        "Startup policy resolved "
+        f"(profile={research_startup_policy.profile}, source={research_startup_policy.source}, "
+        f"heavy_research={research_startup_policy.heavy_research_workers})"
+    )
+    always_on_research = research_startup_policy.always_on_research or _always_on_research_enabled()
     daemon_should_start = bool(saved_daemon.get("enabled") or always_on_research)
     saved_daemon_interval = int(saved_daemon.get("interval_seconds", AI_DAEMON.interval_seconds) or AI_DAEMON.interval_seconds)
     daemon_interval = saved_daemon_interval if saved_daemon.get("enabled") else max(300, saved_daemon_interval)
@@ -96070,13 +96085,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError:
         knowledge_interval = 60
-    knowledge_status = KNOWLEDGE_CURATOR_SCHEDULER.start(
-        interval_seconds=knowledge_interval
-    )
-    print(
-        "Knowledge curator started "
-        f"({knowledge_status.get('interval_seconds', 60)}s, selective specialist engines)"
-    )
+    if research_startup_policy.heavy_research_workers:
+        knowledge_status = KNOWLEDGE_CURATOR_SCHEDULER.start(interval_seconds=knowledge_interval)
+        print(
+            "Knowledge curator started "
+            f"({knowledge_status.get('interval_seconds', 60)}s, selective specialist engines)"
+        )
+    else:
+        knowledge_status = {"running": False, "status": "safe_startup_idle"}
+        print("Knowledge curator idle: clean-install safe startup profile")
     def schedule_startup_learning_proof() -> None:
         try:
             startup_learning_proof = _maybe_schedule_ai_staff_learning_counterfactual(
@@ -96091,13 +96108,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # Evidence catch-up can inspect large Paper ledgers. It is useful startup
     # work, but it must not delay the local API becoming responsive.
-    threading.Thread(
-        target=schedule_startup_learning_proof,
-        name="staff-learning-proof-startup",
-        daemon=True,
-    ).start()
+    if research_startup_policy.heavy_research_workers:
+        threading.Thread(
+            target=schedule_startup_learning_proof,
+            name="staff-learning-proof-startup",
+            daemon=True,
+        ).start()
     startup_focus = build_operating_focus()
-    replay_workers_allowed = bool(startup_focus.get("large_batch_jobs_allowed"))
+    replay_workers_allowed = bool(
+        research_startup_policy.heavy_research_workers
+        and startup_focus.get("large_batch_jobs_allowed")
+    )
     replay_workers_env = str(os.getenv("CODEXSTOCK_REPLAY_WORKERS_ENABLED", "1") or "1").strip().lower()
     replay_workers_allowed = replay_workers_allowed and replay_workers_env not in {"0", "false", "no", "off"}
     if replay_workers_allowed:
@@ -96158,11 +96179,12 @@ def main(argv: list[str] | None = None) -> int:
             "Historical replay and Stage 2 backfill workers stopped for market priority; "
             "large jobs start only on weekend/KRX holiday restarts."
         )
-    threading.Thread(
-        target=warm_secretary_ai_brain,
-        name="secretary-model-prewarm",
-        daemon=True,
-    ).start()
+    if research_startup_policy.heavy_research_workers:
+        threading.Thread(
+            target=warm_secretary_ai_brain,
+            name="secretary-model-prewarm",
+            daemon=True,
+        ).start()
     threading.Thread(
         target=prewarm_mobile_console,
         name="mobile-console-prewarm",

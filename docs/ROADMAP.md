@@ -23,12 +23,16 @@ This roadmap separates engineering maturity from investment-performance proof.
 
 ## Near-Term Public Hardening
 
+Completed in the current hardening change: Windows GitHub Actions, isolated
+project test discovery, storage/timezone dependencies, a repository-local
+virtual-environment setup command, and a one-command paper-mode smoke test.
+
 1. Add synthetic demo data for first-run onboarding.
-2. Add a one-command paper-mode smoke test.
+2. Keep the one-command paper-mode smoke test aligned with API contracts.
 3. Add screenshots after confirming no private data is visible.
-4. Split optional heavy engine dependencies into extras.
+4. Continue splitting optional heavy engine dependencies into extras.
 5. Create a compact public MCP facade with 18-20 read-only tools.
-6. Add GitHub Actions for syntax checks and a lightweight test subset.
+6. Expand the existing Windows GitHub Actions job when new platform targets are added.
 7. Add an English quick-start video or short walkthrough.
 8. Add a sanitized internal-developer demo trace to first-run onboarding.
 

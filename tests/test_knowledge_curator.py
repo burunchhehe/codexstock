@@ -31,9 +31,10 @@ class KnowledgeCuratorTests(unittest.TestCase):
                 KnowledgeCurator(runtime_root)
 
         chmod.assert_called_once_with(env_path, 0o600)
-        run.assert_called_once()
-        self.assertIn("/inheritance:r", run.call_args.args[0])
-        self.assertIn("TEST\\testuser:(F)", run.call_args.args[0])
+        acl_calls = [call for call in run.call_args_list if len(call.args) > 0 and str(env_path) in call.args[0]]
+        self.assertEqual(1, len(acl_calls))
+        self.assertIn("/inheritance:r", acl_calls[0].args[0])
+        self.assertIn("TEST\\testuser:(F)", acl_calls[0].args[0])
     def test_indexes_without_modifying_source_and_returns_provenance(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

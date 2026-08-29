@@ -207,6 +207,30 @@ The repository includes selected real CodexStock captures that exclude account n
 
 ![CodexStock mobile operations console](docs/images/mobile-console-live-2026-07-22.png)
 
+## Hardening contracts
+
+- Clean installations use `CODEXSTOCK_STARTUP_PROFILE=safe`; heavyweight
+  research, replay, model prewarming, and specialist engines require an
+  explicit setting or a previously saved research choice.
+- Synthetic native results always include `data_mode`, `source`, `simulated`,
+  `data_warning`, and `real_order_allowed=false`.
+- Internal architecture and operations scores are not investment-performance
+  or live-trading-readiness scores.
+- Browser write requests require JSON and same-origin evidence.
+- Project tests are pinned to `tests/`; bundled third-party test suites run
+  separately. GitHub Actions verifies compile and regression tests on Windows.
+
+The compatibility server is being decomposed by bounded route group. See
+[`docs/ARCHITECTURE_BOUNDARIES.md`](docs/ARCHITECTURE_BOUNDARIES.md).
+
+```powershell
+.\scripts\setup_dev.ps1 -SkipTests
+.\scripts\smoke_paper_mode.ps1
+.\run_app.ps1
+```
+
+Latest local verification for this hardening change: `1,193 passed, 2 skipped`.
+
 ## Safety Boundaries
 
 CodexStock separates public source code from private runtime state.

@@ -2573,11 +2573,11 @@ class TradeReconciliationTests(unittest.TestCase):
         self.assertEqual(2, result["final_confirmation"]["quantity"])
         submit.assert_not_called()
 
-    def test_always_on_research_defaults_on_and_allows_explicit_opt_out(self):
+    def test_always_on_research_defaults_off_and_allows_explicit_opt_in(self):
         with patch.dict("os.environ", {}, clear=True):
-            self.assertTrue(_always_on_research_enabled())
-        with patch.dict("os.environ", {"CODEXSTOCK_ALWAYS_ON_RESEARCH": "off"}, clear=True):
             self.assertFalse(_always_on_research_enabled())
+        with patch.dict("os.environ", {"CODEXSTOCK_ALWAYS_ON_RESEARCH": "on"}, clear=True):
+            self.assertTrue(_always_on_research_enabled())
 
     def test_staff_learning_audit_does_not_call_repetition_growth(self):
         row = {
