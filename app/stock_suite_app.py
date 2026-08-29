@@ -390,7 +390,8 @@ def _runtime_file(name: str) -> Path:
 def _runtime_directory(*parts: str) -> Path:
     target = USER_DATA_ROOT.joinpath(*parts)
     legacy = LEGACY_DATA_ROOT.joinpath(*parts)
-    if target.exists() or not legacy.exists() or target == legacy:
+    explicit_user_root = bool(os.getenv(USER_DATA_ENV_KEY, "").strip())
+    if explicit_user_root or target.exists() or not legacy.exists() or target == legacy:
         target.mkdir(parents=True, exist_ok=True)
         return target
     return legacy
@@ -39031,6 +39032,7 @@ def ensure_ai_staff_90_session_forward_ab_contract(
     *,
     now: datetime | None = None,
     external_timestamp_evidence: dict[str, object] | None = None,
+    source_schedule: dict[str, object] | None = None,
 ) -> dict[str, object]:
     current = now or datetime.now(_zone("Asia/Seoul", 9))
     if current.tzinfo is None:
@@ -39039,7 +39041,9 @@ def ensure_ai_staff_90_session_forward_ab_contract(
         existing = _load_ai_staff_90_session_forward_ab_contract()
         if existing:
             return {**build_ai_staff_90_session_forward_ab_status(now=current), "created": False}
-        source_status = build_ai_staff_learning_counterfactual_preregistration_status()
+        source_status = build_ai_staff_learning_counterfactual_preregistration_status(
+            schedule=source_schedule,
+        )
         if source_status.get("valid") is not True or source_status.get("hash_valid") is not True:
             return {
                 "ok": False,
@@ -41729,7 +41733,10 @@ def _maybe_schedule_ai_staff_learning_counterfactual(
         schedule,
         now=now,
     )
-    forward_ab_90_session = ensure_ai_staff_90_session_forward_ab_contract(now=now)
+    forward_ab_90_session = ensure_ai_staff_90_session_forward_ab_contract(
+        now=now,
+        source_schedule=schedule,
+    )
     if forward_ab_90_session.get("final_ab_evaluation_due") is True:
         with AI_STAFF_LEARNING_COUNTERFACTUAL_START_LOCK:
             if (
@@ -85461,12 +85468,17 @@ def _build_research_forge_status_uncached(include_readiness: bool = False) -> di
         active_jobs = int(counts.get("QUEUED", 0) or 0) + int(counts.get("RUNNING", 0) or 0)
         analytical_row_count = int(storage.get("row_count", 0) or 0)
         storage_fallback = bool(storage.get("fallback_file_inventory"))
+        engine_connected = bool(status.get("ok") and doctor.get("ok"))
+        data_ready = analytical_row_count > 0
         payload: dict[str, object] = {
-            "ok": bool(status.get("ok") and doctor.get("ok") and analytical_row_count > 0),
+            "ok": engine_connected,
             "schema": "codexstock_research_forge_status_v1",
             "engine": status.get("engine"),
             "version": status.get("version"),
-            "connected": True,
+            "connected": engine_connected,
+            "adapter_ready": engine_connected,
+            "data_ready": data_ready,
+            "evidence_state": "ready" if data_ready else "waiting_for_research_data",
             "mode": "research-only",
             "live_order_allowed": False,
             "max_concurrent_heavy_jobs": 1,
@@ -86055,13 +86067,9 @@ def _external_engine_formal_connection_evidence(
             row for row in recent_runs
             if isinstance(row, dict) and str(row.get("status") or "").lower() == "completed"
         ]
-        adapter_ready = bool(
-            runtime.get("ok")
-            and (
-                (scheduler.get("running") and scheduler.get("thread_alive"))
-                or int(_number(runtime.get("indexed_documents"))) > 0
-            )
-        )
+        # The in-process adapter is connected when its status store is readable.
+        # Indexed documents and completed specialist runs are separate evidence.
+        adapter_ready = bool(runtime.get("ok"))
         round_trip_verified = bool(
             adapter_ready and int(_number(runtime.get("indexed_documents"))) > 0 and completed_runs
         )
@@ -86781,16 +86789,11 @@ def _build_external_engine_dashboard_uncached() -> dict[str, object]:
     curator = build_knowledge_curator_status()
     curator_scheduler = curator.get("scheduler") if isinstance(curator.get("scheduler"), dict) else {}
     curator_current_engine = str(curator_scheduler.get("current_engine") or "")
-    curator_connected = bool(
-        curator.get("ok")
-        and (
-            (curator_scheduler.get("running") and curator_scheduler.get("thread_alive"))
-            or int(_number(curator.get("indexed_documents"))) > 0
-        )
-    )
+    curator_connected = bool(curator.get("ok"))
     curator_in_use = bool(curator_current_engine)
     indexed_documents = int(_number(curator.get("indexed_documents")))
     indexed_sources = int(_number(curator.get("indexed_sources")))
+    curator_data_ready = indexed_documents > 0
     knowledge_curator_engine = {
         "engine_id": "knowledge-curator",
         "engine_name": "CodexStock Knowledge Curator",
@@ -86801,6 +86804,9 @@ def _build_external_engine_dashboard_uncached() -> dict[str, object]:
         "status_label": "전문엔진 처리 중" if curator_in_use else "상시 작동·검색 준비" if curator_connected else "점검 필요",
         "in_use": curator_in_use,
         "connected": curator_connected,
+        "adapter_ready": curator_connected,
+        "data_ready": curator_data_ready,
+        "evidence_state": "indexed" if curator_data_ready else "empty_index",
         "progress_pct": 50 if curator_in_use else 100 if curator_connected else 0,
         "progress_label": f"{curator_current_engine} 처리 중" if curator_in_use else f"문서 {indexed_documents:,}개 정리 완료",
         "eta_label": "현재 묶음 처리 후 완료" if curator_in_use else "새 자료 발생 시 자동 갱신",

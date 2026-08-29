@@ -43,6 +43,48 @@ class StaleWhileRefreshStatusCache:
         self._refresh_generation = 0
         self._next_retry_at_monotonic = 0.0
         self._last_refresh_error = ""
+        self._closed = False
+        self._refresh_threads: set[threading.Thread] = set()
+
+    def _start_refresh_locked(self, refresh_generation: int) -> None:
+        thread = threading.Thread(
+            target=self._refresh_thread,
+            args=(refresh_generation,),
+            daemon=True,
+        )
+        self._refresh_threads.add(thread)
+        thread.start()
+
+    def _refresh_thread(self, refresh_generation: int) -> None:
+        try:
+            self._refresh(refresh_generation)
+        finally:
+            with self._lock:
+                self._refresh_threads.discard(threading.current_thread())
+
+    def wait_for_refresh(self, timeout: float | None = None) -> bool:
+        """Wait until background writers finish so callers can safely clean up."""
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._lock:
+                threads = list(self._refresh_threads)
+            if not threads:
+                return True
+            for thread in threads:
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                thread.join(remaining)
+            if deadline is not None and time.monotonic() >= deadline:
+                with self._lock:
+                    return not self._refresh_threads
+
+    def close(self, timeout: float | None = 5.0) -> bool:
+        """Prevent new refreshes and wait for active refresh writers to stop."""
+        with self._lock:
+            self._closed = True
+            self._refresh_generation += 1
+            self._refreshing = False
+            self._refresh_started_at_monotonic = 0.0
+        return self.wait_for_refresh(timeout)
 
     def get(self) -> dict[str, object]:
         now = time.time()
@@ -79,6 +121,7 @@ class StaleWhileRefreshStatusCache:
                 payload
                 and now - saved_at > self._ttl_seconds
                 and not refreshing
+                and not self._closed
                 and now_monotonic >= self._next_retry_at_monotonic
             ):
                 self._refreshing = True
@@ -86,11 +129,7 @@ class StaleWhileRefreshStatusCache:
                 self._refresh_generation += 1
                 refresh_generation = self._refresh_generation
                 refreshing = True
-                threading.Thread(
-                    target=self._refresh,
-                    args=(refresh_generation,),
-                    daemon=True,
-                ).start()
+                self._start_refresh_locked(refresh_generation)
 
         if payload:
             return self._decorate(payload, saved_at, refreshing)
@@ -134,6 +173,13 @@ class StaleWhileRefreshStatusCache:
         saved_at = 0.0
         already_refreshing = False
         with self._lock:
+            if self._closed:
+                return {
+                    **dict(self._payload),
+                    "ok": bool(self._payload.get("ok")),
+                    "refreshing": False,
+                    "status_cache_closed": True,
+                }
             self._load_durable_locked()
             if not self._payload and self._bootstrap_payload:
                 self._payload = {
@@ -150,11 +196,7 @@ class StaleWhileRefreshStatusCache:
                 self._refresh_started_at_monotonic = now_monotonic
                 self._refresh_generation += 1
                 refresh_generation = self._refresh_generation
-                threading.Thread(
-                    target=self._refresh,
-                    args=(refresh_generation,),
-                    daemon=True,
-                ).start()
+                self._start_refresh_locked(refresh_generation)
         if already_refreshing:
             return self._decorate(payload, saved_at, True) if payload else {
                 "ok": False,
@@ -217,6 +259,8 @@ class StaleWhileRefreshStatusCache:
         ):
             durable_payload.pop(key, None)
         with self._lock:
+            if self._closed:
+                return False
             if (
                 refresh_generation is not None
                 and refresh_generation != self._refresh_generation

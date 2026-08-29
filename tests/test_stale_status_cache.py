@@ -154,6 +154,7 @@ class StaleWhileRefreshStatusCacheTests(unittest.TestCase):
                 self.assertEqual("fresh", cache.get()["value"])
             finally:
                 release_first.set()
+                self.assertTrue(cache.close())
 
     def test_bootstrap_payload_makes_the_first_request_non_blocking(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -208,6 +209,7 @@ class StaleWhileRefreshStatusCacheTests(unittest.TestCase):
                 self.assertNotIn("status_cache_bootstrap", current)
             finally:
                 release.set()
+                self.assertTrue(cache.close())
 
     def test_first_request_persists_for_restart_fallback(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -262,6 +264,39 @@ class StaleWhileRefreshStatusCacheTests(unittest.TestCase):
                 self.assertTrue(started.wait(1))
             finally:
                 release.set()
+                self.assertTrue(cache.close())
+
+    def test_close_prevents_new_background_refreshes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "status.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "test.v1",
+                        "saved_at_epoch": time.time() - 60,
+                        "payload": {"ok": True, "value": "old"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            calls = 0
+
+            def builder():
+                nonlocal calls
+                calls += 1
+                return {"ok": True, "value": "new"}
+
+            cache = StaleWhileRefreshStatusCache(
+                builder=builder,
+                cache_path=cache_path,
+                schema_version="test.v1",
+                ttl_seconds=1,
+            )
+            self.assertTrue(cache.close())
+            result = cache.get()
+
+            self.assertEqual("old", result["value"])
+            self.assertEqual(0, calls)
 
 
 if __name__ == "__main__":

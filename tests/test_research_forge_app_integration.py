@@ -11,7 +11,7 @@ from app.runtime_paths import bootstrap_user_data_tree
 
 
 class ResearchForgeAppIntegrationTests(unittest.TestCase):
-    def test_status_contract_is_connected_and_research_only(self) -> None:
+    def test_status_contract_reports_runtime_evidence_without_fabricating_it(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
             patch(
@@ -24,22 +24,34 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
             ),
         ):
             payload = stock_suite_app.build_research_forge_status(include_readiness=False)
+        self.assertIn("ok", payload)
+        self.assertIn("connected", payload)
+        self.assertFalse(payload["live_order_allowed"])
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["connected"])
-        self.assertFalse(payload["live_order_allowed"])
         self.assertEqual(payload["max_concurrent_heavy_jobs"], 1)
-        self.assertGreaterEqual(payload["analytical_row_count"], 1)
+        self.assertGreaterEqual(payload["analytical_row_count"], 0)
+        self.assertEqual(
+            payload["analytical_row_count"] > 0,
+            payload["data_ready"],
+        )
 
     def test_external_engine_dashboard_contains_research_forge(self) -> None:
         payload = stock_suite_app.build_external_engine_dashboard()
         rows = [row for row in payload["engines"] if row.get("engine_id") == "codexstock-research-forge"]
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0]["adapter_ready"])
-        self.assertTrue(rows[0]["round_trip_verified"])
-        self.assertTrue(rows[0]["formal_connected"])
-        self.assertEqual("normal", rows[0]["operational_state"])
-        self.assertEqual("codexstock_integration_audit", rows[0]["connection_proof_type"])
-        self.assertFalse(rows[0]["recheck_due"])
+        self.assertEqual(
+            bool(rows[0]["round_trip_verified"]),
+            bool(rows[0]["formal_connected"]),
+        )
+        if rows[0]["formal_connected"]:
+            self.assertEqual("normal", rows[0]["operational_state"])
+            self.assertEqual("codexstock_integration_audit", rows[0]["connection_proof_type"])
+            self.assertFalse(rows[0]["recheck_due"])
+        else:
+            self.assertNotEqual("normal", rows[0]["operational_state"])
+            self.assertTrue(rows[0]["recheck_due"])
         self.assertFalse(rows[0]["live_order_allowed"])
         self.assertIn("실전 주문 권한 없음", rows[0]["safety"])
 
@@ -79,8 +91,20 @@ class ResearchForgeAppIntegrationTests(unittest.TestCase):
         payload = stock_suite_app._build_external_engine_dashboard_uncached()
         rows = [row for row in payload["engines"] if row.get("engine_id") == "knowledge-curator"]
         self.assertEqual(1, len(rows))
-        self.assertTrue(rows[0]["connected"])
-        self.assertTrue(rows[0]["round_trip_verified"])
+        self.assertTrue(rows[0]["adapter_ready"])
+        self.assertEqual(
+            rows[0]["runtime"]["indexed_documents"] > 0,
+            rows[0]["data_ready"],
+        )
+        completed_runs = [
+            row
+            for row in rows[0]["runtime"].get("recent_engine_runs", [])
+            if row.get("status") == "completed"
+        ]
+        self.assertEqual(
+            bool(rows[0]["data_ready"] and completed_runs),
+            rows[0]["round_trip_verified"],
+        )
         self.assertFalse(rows[0]["live_order_allowed"])
         self.assertEqual(10, payload["summary"]["engine_count"])
 
