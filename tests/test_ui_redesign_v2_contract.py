@@ -69,6 +69,13 @@ class UiRedesignV2ContractTests(unittest.TestCase):
         self.assertIn('if (state.timer || state.clockTimer) return', source)
         self.assertIn('global.clearInterval(state.timer)', source)
 
+    def test_1440_keeps_three_primary_columns_and_four_operational_cards(self):
+        styles = (WEB_ROOT / "ui-v2" / "dashboard.css").read_text(encoding="utf-8")
+
+        self.assertNotIn("@media (max-width: 1500px)", styles)
+        self.assertIn(".v2-primary-grid { grid-template-columns: minmax(380px, 1.24fr)", styles)
+        self.assertIn(".v2-operations-grid { grid-template-columns: repeat(4, minmax(0, 1fr))", styles)
+
     def test_v2_has_tokens_and_dashboard_only_scope(self):
         tokens = (WEB_ROOT / "ui-v2" / "tokens.css").read_text(encoding="utf-8")
         styles = (WEB_ROOT / "ui-v2" / "dashboard.css").read_text(encoding="utf-8")
