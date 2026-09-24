@@ -76,6 +76,18 @@ class UiRedesignV2ContractTests(unittest.TestCase):
         self.assertIn(".v2-primary-grid { grid-template-columns: minmax(380px, 1.24fr)", styles)
         self.assertIn(".v2-operations-grid { grid-template-columns: repeat(4, minmax(0, 1fr))", styles)
 
+    def test_visual_fixture_is_explicit_and_read_only(self):
+        fixture = (WEB_ROOT / "ui-v2" / "visual-fixture.js").read_text(encoding="utf-8")
+        source = (WEB_ROOT / "ui-v2" / "dashboard.js").read_text(encoding="utf-8")
+
+        self.assertIn('params.get("ui") === "v2" && params.get("fixture") === "visual"', fixture)
+        self.assertNotIn("fetch(", fixture)
+        self.assertNotIn("POST", fixture)
+        self.assertNotIn("/api/", fixture)
+        self.assertIn("테스트 데이터", source)
+        self.assertIn("테스트 데이터 · 거래 불가", source)
+        self.assertIn("CodexStockUiV2VisualFixture?.get?.()", source)
+
     def test_v2_has_tokens_and_dashboard_only_scope(self):
         tokens = (WEB_ROOT / "ui-v2" / "tokens.css").read_text(encoding="utf-8")
         styles = (WEB_ROOT / "ui-v2" / "dashboard.css").read_text(encoding="utf-8")

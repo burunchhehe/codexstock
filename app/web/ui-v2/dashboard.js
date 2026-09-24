@@ -46,7 +46,7 @@
         <header class="v2-topbar">
           <form class="v2-search" id="v2SearchForm" role="search"><span aria-hidden="true">${ICONS.search}</span><input id="v2SearchInput" autocomplete="off" placeholder="종목명, 코드로 기존 관심종목 검색" /><button type="submit">검색</button></form>
           <div class="v2-header-status"><div data-v2="marketState" class="v2-header-item">시장 상태 조회 중</div><div data-v2="marketSummary" class="v2-header-item muted">시장 요약 대기</div><div data-v2="aiState" class="v2-header-item">AI 상태 조회 중</div></div>
-          <div class="v2-header-tools"><time data-v2="clock">--:--:--</time><button type="button" class="v2-icon-button" data-v2-page="settings" aria-label="알림"><span aria-hidden="true">${ICONS.bell}</span><b data-v2="alertCount" hidden>0</b></button></div>
+          <div class="v2-header-tools"><span class="v2-fixture-badge" data-v2="fixtureBadge" hidden>테스트 데이터</span><time data-v2="clock">--:--:--</time><button type="button" class="v2-icon-button" data-v2-page="settings" aria-label="알림"><span aria-hidden="true">${ICONS.bell}</span><b data-v2="alertCount" hidden>0</b></button></div>
         </header>
         <section class="v2-grid v2-kpis" aria-label="핵심 현황">
           <article class="v2-card v2-kpi"><span>총 자산</span><strong data-v2="totalAsset">조회 대기</strong><small data-v2="totalAssetMeta">계좌 상태 확인 중</small></article>
@@ -241,6 +241,14 @@
 
   async function refresh() {
     if (!state.host || state.refreshing) return;
+    const fixture = global.CodexStockUiV2VisualFixture?.get?.();
+    if (fixture) {
+      const badge = state.host.querySelector('[data-v2="fixtureBadge"]');
+      if (badge) badge.hidden = false;
+      render(fixture);
+      text("mode", "테스트 데이터 · 거래 불가", "warning");
+      return;
+    }
     state.refreshing = true;
     try {
       const now = Date.now();

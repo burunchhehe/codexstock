@@ -29,6 +29,7 @@ body[data-ui-v2="true"] *, body[data-ui-v2="true"] *::before, body[data-ui-v2="t
 .v2-header-item.v2-danger::before { background: var(--v2-danger); }
 .v2-header-item.v2-muted { color: var(--v2-muted); }
 .v2-header-tools { display: flex; align-items: center; gap: var(--v2-space-3); color: var(--v2-muted); font-size: 12px; white-space: nowrap; }
+.v2-fixture-badge { border: 1px solid color-mix(in srgb, var(--v2-warning) 60%, var(--v2-border)); border-radius: 999px; padding: 4px 8px; color: var(--v2-warning); font-size: 11px; font-weight: 700; }
 .v2-icon-button { position: relative; width: 32px; height: 32px; border: 1px solid var(--v2-border); border-radius: 999px; color: var(--v2-text); }
 .v2-icon-button b { position: absolute; top: -5px; right: -6px; display: grid; min-width: 17px; height: 17px; place-items: center; border-radius: 999px; background: var(--v2-danger); color: var(--v2-text); font-size: 10px; }
 
