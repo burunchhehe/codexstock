@@ -1,0 +1,38 @@
+:root {
+  --v2-bg: #07111f;
+  --v2-sidebar: #091827;
+  --v2-surface: #0c1b2d;
+  --v2-surface-raised: #10243a;
+  --v2-surface-soft: #0f2135;
+  --v2-border: #1e3853;
+  --v2-border-strong: #2b4b69;
+  --v2-text: #eaf2fb;
+  --v2-muted: #8da4bd;
+  --v2-subtle: #5f7893;
+  --v2-accent: #26d8c2;
+  --v2-accent-soft: #143f45;
+  --v2-profit: #f16c78;
+  --v2-loss: #5b9dff;
+  --v2-warning: #f6b94a;
+  --v2-danger: #fa535f;
+  --v2-info: #56b9ff;
+  --v2-chart-1: #42bdf3;
+  --v2-chart-2: #8e71ed;
+  --v2-chart-3: #39c5a8;
+  --v2-chart-4: #f5b840;
+  --v2-chart-5: #f4779f;
+  --v2-chart-6: #6d8fae;
+  --v2-chart-cash: #7890aa;
+  --v2-space-1: 4px;
+  --v2-space-2: 8px;
+  --v2-space-3: 12px;
+  --v2-space-4: 16px;
+  --v2-space-5: 24px;
+  --v2-space-6: 32px;
+  --v2-radius-sm: 10px;
+  --v2-radius-md: 14px;
+  --v2-radius-lg: 18px;
+  --v2-sidebar-width: 224px;
+  --v2-header-height: 72px;
+  --v2-shadow: 0 16px 38px rgb(0 0 0 / 16%);
+}
