@@ -55,7 +55,7 @@
           <article class="v2-card v2-kpi v2-risk-card"><span>리스크 상태</span><strong data-v2="riskState">조회 대기</strong><small data-v2="riskMeta">운영 게이트 확인 중</small></article>
         </section>
         <section class="v2-grid v2-primary-grid">
-          <article class="v2-card v2-asset-card"><div class="v2-section-head"><div><h1>자산 추이</h1><p>실계좌 자산 시계열</p></div><div class="v2-range-tabs" aria-label="자산 추이 기간"><button disabled>1주</button><button disabled>1개월</button><button disabled>3개월</button><button disabled>1년</button><button disabled>전체</button></div></div><div class="v2-empty-chart"><strong>자산 시계열 데이터 계약 대기</strong><span>현재 API는 현재 잔고와 체결 기록을 제공하지만, 기간별 계좌 평가금 이력은 제공하지 않습니다.</span></div></article>
+          <article class="v2-card v2-asset-card"><div class="v2-section-head"><div><h1>자산 추이</h1></div></div><div class="v2-empty-chart"><strong>계좌 자산 시계열 데이터가 아직 없습니다.</strong><span>실제 계좌 히스토리 수집 후 표시됩니다.</span></div></article>
           <article class="v2-card v2-portfolio-card"><div class="v2-section-head"><div><h2>포트폴리오 현황</h2><p data-v2="portfolioMeta">계좌 데이터 대기</p></div><button class="v2-link" type="button" data-v2-page="trading">상세 보기</button></div><div class="v2-allocation"><div class="v2-donut" data-v2="donut"><span data-v2="positionCount">-</span></div><div class="v2-legend" data-v2="portfolioLegend"></div></div><div class="v2-table-scroll"><table class="v2-table"><thead><tr><th>종목</th><th>평가금액</th><th>비중</th><th>손익률</th></tr></thead><tbody data-v2="portfolioRows"></tbody></table></div></article>
           <article class="v2-card v2-staff-card"><div class="v2-section-head"><div><h2>AI 직원 상태</h2><p data-v2="staffMeta">직원 원장 대기</p></div><button class="v2-link" type="button" data-v2-page="aiTrader">전체 현황</button></div><div class="v2-staff-list" data-v2="staffRows"></div></article>
         </section>
@@ -209,6 +209,7 @@
     const approvals = Array.isArray(ops?.approvals?.recent) ? ops.approvals.recent : [];
     const pending = approvals.filter((row) => String(row.status || "").toLowerCase() === "pending");
     text("approvalCount", `${Number(ops?.approvals?.pending ?? pending.length)}`);
+    state.host?.querySelector(".v2-approval-card")?.classList.toggle("v2-has-pending", pending.length > 0);
     const markup = pending.length ? pending.slice(0, 5).map((row) => `<tr><td>${escapeHtml(row.side || row.type || "승인")}</td><td><strong>${escapeHtml(row.name || row.symbol || "종목 미제공")}</strong></td><td>${escapeHtml(row.status || "대기")}</td><td>${escapeHtml(compactTime(row.created_at || row.requested_at))}</td></tr>`).join("") : '<tr><td colspan="4" class="v2-empty-cell">현재 승인 대기 항목이 없습니다.</td></tr>';
     renderMarkup("approvalRows", markup, hash(pending));
   }
@@ -253,7 +254,7 @@
   }
 
   function updateClock() { text("clock", new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })); }
-  function start() { updateClock(); refresh(); state.timer = global.setInterval(refresh, REFRESH_MS); state.clockTimer = global.setInterval(updateClock, 1_000); }
+  function start() { if (state.timer || state.clockTimer) return; updateClock(); refresh(); state.timer = global.setInterval(refresh, REFRESH_MS); state.clockTimer = global.setInterval(updateClock, 1_000); }
   function stop() { global.clearInterval(state.timer); global.clearInterval(state.clockTimer); state.timer = 0; state.clockTimer = 0; }
 
   global.CodexStockUiV2 = { mount, start, stop };

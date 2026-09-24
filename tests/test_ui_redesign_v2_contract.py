@@ -45,7 +45,7 @@ class UiRedesignV2ContractTests(unittest.TestCase):
         source = (WEB_ROOT / "ui-v2" / "dashboard.js").read_text(encoding="utf-8")
         source_map = (Path(__file__).resolve().parents[1] / "docs" / "UI_V2_DATA_SOURCE_MAP.md").read_text(encoding="utf-8")
 
-        self.assertIn("자산 시계열 데이터 계약 대기", source)
+        self.assertIn("계좌 자산 시계열 데이터가 아직 없습니다.", source)
         self.assertNotIn("state.equity", source)
         self.assertIn('value === null || value === undefined || value === ""', source)
         self.assertIn("not implemented until a true account", source_map)
@@ -60,6 +60,14 @@ class UiRedesignV2ContractTests(unittest.TestCase):
             "실시간 주요 종목", "AI 추천 후보", "승인 필요", "공지 및 시스템 알림",
         ):
             self.assertIn(label, source)
+
+    def test_risk_approval_and_timer_states_are_semantic(self):
+        source = (WEB_ROOT / "ui-v2" / "dashboard.js").read_text(encoding="utf-8")
+
+        self.assertIn('riskTone = /BLOCK|HALT|CONFLICT|REQUIRED|차단|정지|오류/i.test(safety)', source)
+        self.assertIn('classList.toggle("v2-has-pending", pending.length > 0)', source)
+        self.assertIn('if (state.timer || state.clockTimer) return', source)
+        self.assertIn('global.clearInterval(state.timer)', source)
 
     def test_v2_has_tokens_and_dashboard_only_scope(self):
         tokens = (WEB_ROOT / "ui-v2" / "tokens.css").read_text(encoding="utf-8")
