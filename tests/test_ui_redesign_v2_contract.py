@@ -11,23 +11,55 @@ class UiRedesignV2ContractTests(unittest.TestCase):
         boot = (WEB_ROOT / "ui-v2" / "boot.js").read_text(encoding="utf-8")
 
         self.assertIn("ui-v2/boot.js", html)
-        self.assertIn('params.get("ui") !== "v2"', boot)
+        self.assertIn('get("ui") !== "v2"', boot)
         self.assertIn('document.body.dataset.uiV2 = "true"', boot)
-        self.assertIn('document.querySelector(".app-shell")', boot)
-        self.assertNotIn("observe(document.body", boot)
-        self.assertIn("observer?.disconnect()", boot)
+        self.assertNotIn("MutationObserver", boot)
 
-    def test_v2_layer_uses_existing_dom_and_never_issues_requests(self):
+    def test_v2_uses_only_documented_read_only_data_contracts(self):
+        source = (WEB_ROOT / "ui-v2" / "dashboard.js").read_text(encoding="utf-8")
+        source_map = (Path(__file__).resolve().parents[1] / "docs" / "UI_V2_DATA_SOURCE_MAP.md").read_text(encoding="utf-8")
+
+        for path in (
+            "/api/ops/status/poll",
+            "/api/kis/account",
+            "/api/ops/live-performance",
+            "/api/agent/staff/quick?ttl=60",
+            "/api/agent/market-clock",
+            "/api/agent/alerts",
+            "/api/agent/screener",
+            "/api/market?bars=1",
+        ):
+            self.assertIn(path, source)
+            self.assertIn(path, source_map)
+        self.assertIn("Promise.all", source)
+        self.assertIn("REFRESH_MS = 30_000", source)
+        self.assertIn("ACCOUNT_REFRESH_MS = 60_000", source)
+        self.assertNotIn("MutationObserver", source)
+        self.assertNotIn('method: "POST"', source)
+        self.assertNotIn("/api/order", source)
+        self.assertNotIn("/api/approval", source)
+        self.assertNotIn("/api/risk", source)
+        self.assertIn('document.body.dataset.uiV2 = "false"', source)
+
+    def test_v2_never_relabels_backtest_data_as_account_history(self):
+        source = (WEB_ROOT / "ui-v2" / "dashboard.js").read_text(encoding="utf-8")
+        source_map = (Path(__file__).resolve().parents[1] / "docs" / "UI_V2_DATA_SOURCE_MAP.md").read_text(encoding="utf-8")
+
+        self.assertIn("자산 시계열 데이터 계약 대기", source)
+        self.assertNotIn("state.equity", source)
+        self.assertIn('value === null || value === undefined || value === ""', source)
+        self.assertIn("not implemented until a true account", source_map)
+
+    def test_dashboard_contains_requested_operational_sections(self):
         source = (WEB_ROOT / "ui-v2" / "dashboard.js").read_text(encoding="utf-8")
 
-        self.assertIn('sourceText("#dashEquity"', source)
-        self.assertIn('sourceText("#accountPnlValue"', source)
-        self.assertIn('sourceText("#accountStockValue"', source)
-        self.assertIn('sourceText("#dashRisk"', source)
-        self.assertNotIn("fetch(", source)
-        self.assertNotIn("/api/order", source)
-        self.assertNotIn("POST", source)
-        self.assertIn('document.body.dataset.uiV2 = "false"', source)
+        for label in (
+            "대시보드", "AI 트레이더", "후보/추천", "매매 승인", "포트폴리오",
+            "전략 연구", "백테스트", "AI 직원", "매매일지", "시스템 관제", "설정",
+            "총 자산", "오늘 실현 손익", "투자중 금액", "리스크 상태", "자산 추이",
+            "실시간 주요 종목", "AI 추천 후보", "승인 필요", "공지 및 시스템 알림",
+        ):
+            self.assertIn(label, source)
 
     def test_v2_has_tokens_and_dashboard_only_scope(self):
         tokens = (WEB_ROOT / "ui-v2" / "tokens.css").read_text(encoding="utf-8")
@@ -37,6 +69,7 @@ class UiRedesignV2ContractTests(unittest.TestCase):
         for token in ("--v2-bg", "--v2-surface", "--v2-accent", "--v2-profit", "--v2-loss", "--v2-warning", "--v2-danger"):
             self.assertIn(token, tokens)
         self.assertIn('body[data-ui-v2="true"]', styles)
+        self.assertIn("overflow-x: hidden", styles)
         self.assertIn("dashboard-only", spec)
         self.assertIn("?ui=v2", spec)
 

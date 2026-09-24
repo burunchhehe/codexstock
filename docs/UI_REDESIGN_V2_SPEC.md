@@ -89,10 +89,13 @@ warning, and danger independently from P/L.
 
 ## Data and interaction contract
 
-- Reuse the values already rendered by `app.js` and existing API results. Do
-  not issue new data-changing requests from UI v2.
-- The v2 boot layer may observe existing DOM mutations and copy text into its
-  presentation cards. It must never modify the source element values.
+- Reuse existing read-only API results without changing their contracts. The
+  concrete dashboard source map is maintained in `UI_V2_DATA_SOURCE_MAP.md`.
+  UI v2 must never issue a data-changing request or modify legacy source
+  element values.
+- V2 batches its read-only refreshes and applies field/list updates by
+  signature. It does not observe legacy DOM mutations or rebuild the complete
+  dashboard for every market update.
 - The only v2 interactions in phase one are navigation to existing pages and
   opening the existing approval page. No new buy, sell, approval, or automation
   controls are permitted.
@@ -103,7 +106,7 @@ warning, and danger independently from P/L.
 
 ```
 app/web/ui-v2/
-  boot.js          # query flag, mount, DOM observation, safe navigation
+  boot.js          # query flag, mount, safe navigation
   tokens.css       # only design tokens and reset for v2
   dashboard.css    # dashboard layout and components
   dashboard.js     # dashboard renderer; no API writes
