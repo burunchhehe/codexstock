@@ -4,6 +4,7 @@
   const params = new URLSearchParams(global.location.search);
   const localHost = ["localhost", "127.0.0.1", "::1"].includes(global.location.hostname);
   const enabled = localHost && params.get("ui") === "v2" && params.get("fixture") === "visual";
+  const aiTraderEnabled = enabled && params.get("page") === "aiTrader";
   const positions = [
     ["삼성전자전자부품", "005930", 185000000, 4.31], ["SK하이닉스", "000660", 163000000, -1.82],
     ["한화에어로스페이스", "012450", 119000000, 2.15], ["현대차", "005380", 86000000, 0.74],
@@ -37,5 +38,14 @@
     };
   }
 
-  global.CodexStockUiV2VisualFixture = { enabled, get };
+  function getAiTrader() {
+    if (!aiTraderEnabled) return null;
+    const fixture = get();
+    return {
+      ...fixture,
+      plan: { summary: { autopilot_running: true, mode: "시장 감시", phase: "정규장", primary_market: "KR", cadence_minutes: 5, next_check_at: "2026-09-25T10:30:00" }, headline: "거래대금 상위 후보의 수급과 리스크 조건을 동시에 확인 중입니다.", actions: [{ label: "시장 감시", state: "진행" }, { label: "후보 발굴", state: "완료" }, { label: "리스크 검증", state: "진행" }], recent_runs: [{ created_at: "10:21", mode: "후보 발굴", message: "반도체 후보의 거래대금 조건을 통과했습니다.", status: "기록" }, { created_at: "10:17", mode: "리스크 검증", message: "신규 진입 전 손절 기준을 재확인했습니다.", status: "주의" }] },
+    };
+  }
+
+  global.CodexStockUiV2VisualFixture = { enabled, get, getAiTrader };
 })(window);

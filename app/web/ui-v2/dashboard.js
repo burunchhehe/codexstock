@@ -80,6 +80,13 @@
   }
 
   function navigate(page) {
+    if (page === "aiTrader") {
+      const nextUrl = new URL(global.location.href);
+      nextUrl.searchParams.set("ui", "v2");
+      nextUrl.searchParams.set("page", "aiTrader");
+      global.location.assign(nextUrl);
+      return;
+    }
     document.querySelector(`.tab[data-page="${page}"]`)?.click();
     stop();
     document.body.dataset.uiV2 = "false";

@@ -90,6 +90,22 @@ class UiRedesignV2ContractTests(unittest.TestCase):
         self.assertIn("CodexStockUiV2VisualFixture?.get?.()", source)
         self.assertIn('aria-label="종목명 또는 코드 검색"', source)
 
+    def test_ai_trader_route_and_fixture_are_read_only(self):
+        source = (WEB_ROOT / "ui-v2" / "ai-trader.js").read_text(encoding="utf-8")
+        fixture = (WEB_ROOT / "ui-v2" / "visual-fixture.js").read_text(encoding="utf-8")
+
+        self.assertIn('get("page") === "aiTrader"', (WEB_ROOT / "ui-v2" / "boot.js").read_text(encoding="utf-8"))
+        self.assertIn("CodexStockUiV2VisualFixture?.getAiTrader?.()", source)
+        self.assertNotIn('method: "POST"', source)
+        self.assertNotIn("/api/order", source)
+        self.assertNotIn("/api/approval", source)
+        self.assertNotIn("/api/risk", source)
+        self.assertIn('params.get("page") === "aiTrader"', fixture)
+        self.assertIn('localHost && params.get("ui") === "v2" && params.get("fixture") === "visual"', fixture)
+        self.assertIn("테스트 데이터 · 거래 불가", source)
+        self.assertIn('stop(); const url = new URL(global.location.href)', source)
+        self.assertIn("function stop()", source)
+
     def test_v2_has_tokens_and_dashboard_only_scope(self):
         tokens = (WEB_ROOT / "ui-v2" / "tokens.css").read_text(encoding="utf-8")
         styles = (WEB_ROOT / "ui-v2" / "dashboard.css").read_text(encoding="utf-8")
