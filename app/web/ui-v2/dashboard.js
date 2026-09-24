@@ -44,7 +44,7 @@
       </aside>
       <main class="v2-main">
         <header class="v2-topbar">
-          <form class="v2-search" id="v2SearchForm" role="search"><span aria-hidden="true">${ICONS.search}</span><input id="v2SearchInput" autocomplete="off" placeholder="종목명, 코드로 기존 관심종목 검색" /><button type="submit">검색</button></form>
+          <form class="v2-search" id="v2SearchForm" role="search"><span aria-hidden="true">${ICONS.search}</span><input id="v2SearchInput" aria-label="종목명 또는 코드 검색" autocomplete="off" placeholder="종목명, 코드로 기존 관심종목 검색" /><button type="submit">검색</button></form>
           <div class="v2-header-status"><div data-v2="marketState" class="v2-header-item">시장 상태 조회 중</div><div data-v2="marketSummary" class="v2-header-item muted">시장 요약 대기</div><div data-v2="aiState" class="v2-header-item">AI 상태 조회 중</div></div>
           <div class="v2-header-tools"><span class="v2-fixture-badge" data-v2="fixtureBadge" hidden>테스트 데이터</span><time data-v2="clock">--:--:--</time><button type="button" class="v2-icon-button" data-v2-page="settings" aria-label="알림"><span aria-hidden="true">${ICONS.bell}</span><b data-v2="alertCount" hidden>0</b></button></div>
         </header>
@@ -56,7 +56,7 @@
         </section>
         <section class="v2-grid v2-primary-grid">
           <article class="v2-card v2-asset-card"><div class="v2-section-head"><div><h1>자산 추이</h1></div></div><div class="v2-empty-chart"><strong>계좌 자산 시계열 데이터가 아직 없습니다.</strong><span>실제 계좌 히스토리 수집 후 표시됩니다.</span></div></article>
-          <article class="v2-card v2-portfolio-card"><div class="v2-section-head"><div><h2>포트폴리오 현황</h2><p data-v2="portfolioMeta">계좌 데이터 대기</p></div><button class="v2-link" type="button" data-v2-page="trading">상세 보기</button></div><div class="v2-allocation"><div class="v2-donut" data-v2="donut"><span data-v2="positionCount">-</span></div><div class="v2-legend" data-v2="portfolioLegend"></div></div><div class="v2-table-scroll"><table class="v2-table"><thead><tr><th>종목</th><th>평가금액</th><th>비중</th><th>손익률</th></tr></thead><tbody data-v2="portfolioRows"></tbody></table></div></article>
+          <article class="v2-card v2-portfolio-card"><div class="v2-section-head"><div><h2>포트폴리오 현황</h2><p data-v2="portfolioMeta">계좌 데이터 대기</p></div><button class="v2-link" type="button" data-v2-page="trading">상세 보기</button></div><div class="v2-allocation"><div class="v2-donut" data-v2="donut"><span data-v2="positionCount">-</span></div><div class="v2-legend" data-v2="portfolioLegend"></div></div><div class="v2-table-scroll"><table class="v2-table v2-portfolio-table"><thead><tr><th>종목</th><th>평가금액</th><th>비중</th><th>손익률</th></tr></thead><tbody data-v2="portfolioRows"></tbody></table></div></article>
           <article class="v2-card v2-staff-card"><div class="v2-section-head"><div><h2>AI 직원 상태</h2><p data-v2="staffMeta">직원 원장 대기</p></div><button class="v2-link" type="button" data-v2-page="aiTrader">전체 현황</button></div><div class="v2-staff-list" data-v2="staffRows"></div></article>
         </section>
         <section class="v2-grid v2-operations-grid">

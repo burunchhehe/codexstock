@@ -2,7 +2,8 @@
   "use strict";
 
   const params = new URLSearchParams(global.location.search);
-  const enabled = params.get("ui") === "v2" && params.get("fixture") === "visual";
+  const localHost = ["localhost", "127.0.0.1", "::1"].includes(global.location.hostname);
+  const enabled = localHost && params.get("ui") === "v2" && params.get("fixture") === "visual";
   const positions = [
     ["삼성전자전자부품", "005930", 185000000, 4.31], ["SK하이닉스", "000660", 163000000, -1.82],
     ["한화에어로스페이스", "012450", 119000000, 2.15], ["현대차", "005380", 86000000, 0.74],
